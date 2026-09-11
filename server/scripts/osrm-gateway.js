@@ -346,6 +346,8 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  const url = req.url || '/';
+
   // Ignore favicon without counting
   if (url === '/favicon.ico') {
     res.writeHead(204);
