@@ -1,10 +1,9 @@
 /**
  * ML Service Client for Node.js Express / NestJS Backend
- * Communicates with the internal Python FastAPI ML microservice.
+ * Communicates with the Python FastAPI ML microservice via native fetch.
+ * Zero external dependencies (avoids missing module errors in production containers).
  * Handles timeouts, structured error wrapping, and connection resilience.
  */
-
-import axios, { AxiosInstance, AxiosError } from 'axios';
 
 export interface TripMlPredictionRequest {
   origin: string;
@@ -104,44 +103,52 @@ export interface TripMlPredictionResponse {
 }
 
 export class MlServiceClient {
-  private client: AxiosInstance;
   private baseUrl: string;
 
   constructor() {
     this.baseUrl = (process.env.ML_SERVICE_URL || 'http://localhost:8000').replace(/\/+$/, '');
-    this.client = axios.create({
-      baseURL: this.baseUrl,
-      timeout: 60000, // 60 seconds timeout for full multi-day itinerary synthesis
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-    });
+  }
+
+  private async request(endpoint: string, method: 'GET' | 'POST' = 'GET', body?: any): Promise<any> {
+    const url = `${this.baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(60000),
+      });
+
+      if (!res.ok) {
+        let detail = `HTTP ${res.status} ${res.statusText}`;
+        try {
+          const errJson: any = await res.json();
+          detail = errJson.detail || errJson.message || detail;
+        } catch {}
+        console.error(`[ML Client] Request failed: ${url} -> ${detail}`);
+        throw new Error(detail);
+      }
+
+      return await res.json();
+    } catch (err: any) {
+      console.error(`[ML Client] Error in ${endpoint}:`, err?.message || err);
+      throw err;
+    }
   }
 
   /** Checks health status of Python ML microservice */
   async checkHealth(): Promise<any> {
-    try {
-      const res = await this.client.get('/health');
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'checkHealth');
-      throw err;
-    }
+    return this.request('/health', 'GET');
   }
 
   /**
    * Generates ML-driven trip prediction, cost optimization, transport/hotel ranking, and itinerary.
    */
   async predictTrip(payload: any): Promise<any> {
-    try {
-      // Route to master /plan if message is provided or standard payload
-      const res = await this.client.post('/plan', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'predictTrip');
-      throw err;
-    }
+    return this.request('/plan', 'POST', payload);
   }
 
   /**
@@ -149,169 +156,74 @@ export class MlServiceClient {
    * Handles natural language prompts or structured payloads through the 15-step pipeline.
    */
   async planMaster(payload: Record<string, any>): Promise<any> {
-    try {
-      console.log(`[ML Client] Requesting End-to-End AI Master Plan...`);
-      const res = await this.client.post('/plan', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'planMaster');
-      throw err;
-    }
+    console.log(`[ML Client] Requesting End-to-End AI Master Plan...`);
+    return this.request('/plan', 'POST', payload);
   }
 
   /** Specialized Trip Cost Prediction */
   async predictCost(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/predict/trip-cost', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'predictCost');
-      throw err;
-    }
+    return this.request('/predict/trip-cost', 'POST', payload);
   }
 
   /** Specialized Transport Ranking */
   async predictTransport(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/predict/transport', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'predictTransport');
-      throw err;
-    }
+    return this.request('/predict/transport', 'POST', payload);
   }
 
   /** Specialized Hotel Ranking */
   async predictHotel(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/predict/hotel', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'predictHotel');
-      throw err;
-    }
+    return this.request('/predict/hotel', 'POST', payload);
   }
 
   /** Specialized Activity Ranking */
   async predictActivity(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/predict/activity', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'predictActivity');
-      throw err;
-    }
+    return this.request('/predict/activity', 'POST', payload);
   }
 
   /** Generates candidate multimodal transport options */
   async getTransportOptions(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/transport/options', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'getTransportOptions');
-      throw err;
-    }
+    return this.request('/transport/options', 'POST', payload);
   }
 
   /** Ranks transport options with configurable weight modes */
   async rankTransport(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/transport/rank', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'rankTransport');
-      throw err;
-    }
+    return this.request('/transport/rank', 'POST', payload);
   }
 
   /** Calculates detailed itemized budget across tiers and runs optimization */
   async calculateBudget(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/budget/calculate', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'calculateBudget');
-      throw err;
-    }
+    return this.request('/budget/calculate', 'POST', payload);
   }
 
   /** End-to-end trip estimation: OSRM + Transport Intelligence + Budget Engine + Optimization */
   async estimateTrip(payload: Record<string, any>): Promise<any> {
-    try {
-      console.log(`[ML Client] Estimating trip for ${payload.origin} -> ${payload.destination} (${payload.days} days, ₹${payload.budget})`);
-      const res = await this.client.post('/trip/estimate', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'estimateTrip');
-      throw err;
-    }
+    console.log(`[ML Client] Estimating trip for ${payload.origin} -> ${payload.destination} (${payload.days} days, ₹${payload.budget})`);
+    return this.request('/trip/estimate', 'POST', payload);
   }
 
   /** Recommends hotels and hostels across budget, mid-range, and premium tiers */
   async recommendHotels(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/recommend/hotels', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'recommendHotels');
-      throw err;
-    }
+    return this.request('/recommend/hotels', 'POST', payload);
   }
 
   /** Recommends tourist sights and activities across 14 interest categories */
   async recommendActivities(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/recommend/activities', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'recommendActivities');
-      throw err;
-    }
+    return this.request('/recommend/activities', 'POST', payload);
   }
 
   /** Generates physics-consistent day-by-day itinerary with OSRM routing and opening hours */
   async generateItinerary(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/itinerary/generate', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'generateItinerary');
-      throw err;
-    }
+    return this.request('/itinerary/generate', 'POST', payload);
   }
 
   /** Optimizes itinerary spatial sequence and road driving time */
   async optimizeItinerary(payload: Record<string, any>): Promise<any> {
-    try {
-      const res = await this.client.post('/itinerary/optimize', payload);
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'optimizeItinerary');
-      throw err;
-    }
+    return this.request('/itinerary/optimize', 'POST', payload);
   }
 
   /** OSRM Route Query via Python ML Microservice */
   async getOsrmRoute(coordinates: [number, number][], profile: string = 'driving'): Promise<any> {
-    try {
-      const res = await this.client.post('/osrm/route', { coordinates, profile });
-      return res.data;
-    } catch (err: unknown) {
-      this.handleError(err, 'getOsrmRoute');
-      throw err;
-    }
-  }
-
-  private handleError(err: unknown, method: string) {
-    if (axios.isAxiosError(err)) {
-      const axiosErr = err as AxiosError<{ detail?: string }>;
-      const status = axiosErr.response?.status;
-      const detail = axiosErr.response?.data?.detail || axiosErr.message;
-      console.error(`[ML Client] Error in ${method} (Status ${status}): ${detail}`);
-    } else {
-      console.error(`[ML Client] Unexpected error in ${method}:`, err);
-    }
+    return this.request('/osrm/route', 'POST', { coordinates, profile });
   }
 }
 
