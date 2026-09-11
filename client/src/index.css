@@ -1156,3 +1156,35 @@ img[alt="TREK"] {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 .trek-range::-moz-range-track { height: 5px; border-radius: 999px; background: transparent; }
+
+/* Animated OSRM Road Path Flow */
+@keyframes routeDashFlow {
+  0% {
+    stroke-dashoffset: 60;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animated-route-flow {
+  stroke-dasharray: 12, 18 !important;
+  animation: routeDashFlow 1.4s linear infinite !important;
+}
+
+/* Animated Yellow Comet Flow along electric blue route */
+@keyframes yellowCometFlow {
+  0% {
+    stroke-dashoffset: 90;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animated-yellow-comet-flow {
+  stroke-dasharray: 12, 32 !important;
+  animation: yellowCometFlow 1.5s linear infinite !important;
+}
+
+

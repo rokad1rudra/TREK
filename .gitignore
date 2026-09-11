@@ -66,3 +66,6 @@ test-data
 
 .run
 .full-review
+osrm-data/
+__pycache__/
+*.pyc

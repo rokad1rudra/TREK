@@ -1,0 +1,11 @@
+services:
+  osrm-west:
+    image: osrm/osrm-backend:latest
+    container_name: trek_osrm_west
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+      - "5002:5000"
+    volumes:
+      - ./osrm-data:/data
+    command: osrm-routed --algorithm mld -t 1 /data/western-zone-latest.osrm

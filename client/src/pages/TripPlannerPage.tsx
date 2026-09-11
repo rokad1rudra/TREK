@@ -33,8 +33,8 @@ import CollabPanel from '../components/Collab/CollabPanel'
 import PluginFrame from '../components/Plugins/PluginFrame'
 import TripWarningsBanner from '../components/Planner/TripWarningsBanner'
 import Navbar from '../components/Layout/Navbar'
-import { useToast } from '../components/shared/Toast'
-import { Map, X, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Ticket, PackageCheck, Wallet, FolderOpen, Users, Train } from 'lucide-react'
+import { AiTripPlannerModal } from '../components/Planner/AiTripPlannerModal'
+import { Map, X, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Ticket, PackageCheck, Wallet, FolderOpen, Users, Train, Sparkles } from 'lucide-react'
 import { useTranslation } from '../i18n'
 import { addonsApi, accommodationsApi, authApi, tripsApi, assignmentsApi, mapsApi } from '../api/client'
 import { accommodationRepo } from '../repo/accommodationRepo'
@@ -220,13 +220,9 @@ export default function TripPlannerPage(): React.ReactElement | null {
   const [glMap, setGlMap] = useState<CompassMap | null>(null)
   const poiPillEnabled = useSettingsStore(s => s.settings.map_poi_pill_enabled) !== false
 
-  // Costs expense editor opened from a booking modal (save-then-open). Lives at the
-  // page level so it has tripMembers / base currency / current user available.
   const meId = useAuthStore(s => s.user?.id ?? -1)
   const displayCurrency = useSettingsStore(s => s.settings.default_currency)
   const costsBase = (displayCurrency || trip?.currency || 'EUR').toUpperCase()
-  // Transit search departs against a real date, so the whole Automated mode —
-  // the day-header tram button and the modal's mode switch — is off without one.
   const tripHasDates = Boolean(trip?.start_date && trip?.end_date)
   const loadBudgetItems = useTripStore(s => s.loadBudgetItems)
   const [bookingExpense, setBookingExpense] = useState<{ editing: BudgetItem | null; prefill?: ExpensePrefill } | null>(null)
@@ -234,6 +230,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
     if (req.editItem) setBookingExpense({ editing: req.editItem })
     else if (req.prefill) setBookingExpense({ editing: null, prefill: req.prefill })
   }
+  const [showAiPlannerModal, setShowAiPlannerModal] = useState(false)
 
   if (isLoading || !splashDone) {
     return (
@@ -284,22 +281,32 @@ export default function TripPlannerPage(): React.ReactElement | null {
 
       <div className="bg-surface-elevated border-b border-edge-faint" style={{
         position: 'fixed', top: 'var(--nav-h)', left: 0, right: 0, zIndex: 40,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '0 12px',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 16px',
         backdropFilter: 'blur(16px)',
         WebkitBackdropFilter: 'blur(16px)',
         height: 44,
       }}>
-        <SlidingTabs
-          tabs={TRIP_TABS.map(tab => ({
-            id: tab.id,
-            label: <span className="hidden sm:inline">{tab.shortLabel || tab.label}</span>,
-            title: tab.label,
-            icon: tab.icon,
-          }))}
-          activeTab={activeTab}
-          onChange={handleTabChange}
-        />
+        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+          <SlidingTabs
+            tabs={TRIP_TABS.map(tab => ({
+              id: tab.id,
+              label: <span className="hidden sm:inline">{tab.shortLabel || tab.label}</span>,
+              title: tab.label,
+              icon: tab.icon,
+            }))}
+            activeTab={activeTab}
+            onChange={handleTabChange}
+          />
+        </div>
+        <button
+          onClick={() => setShowAiPlannerModal(true)}
+          className="flex items-center gap-1.5 rounded-full bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 px-3.5 py-1 text-xs font-extrabold shadow-lg shadow-black/40 transition-all cursor-pointer"
+          title="ABCD AI Trip Planner & Budget Suggestions"
+        >
+          <Sparkles className="text-white" size={13} />
+          <span className="hidden sm:inline text-white font-extrabold">AI Planner</span>
+        </button>
       </div>
 
       {/* Offset by navbar + tab bar (44px) */}
@@ -313,6 +320,8 @@ export default function TripPlannerPage(): React.ReactElement | null {
           <div style={{ position: 'absolute', inset: 0 }}>
             <MapView
               tripId={tripId}
+              originLocation={trip?.origin_location}
+              destinationLocation={trip?.destination_location}
               places={mapPlaces}
               dayPlaces={dayPlaces}
               route={route}
@@ -807,6 +816,12 @@ export default function TripPlannerPage(): React.ReactElement | null {
         onConfirm={confirmDeletePlaces}
         title={t('common.delete')}
         message={t('trip.confirm.deletePlaces', { count: deletePlaceIds?.length ?? 0 })}
+      />
+      <AiTripPlannerModal
+        isOpen={showAiPlannerModal}
+        onClose={() => setShowAiPlannerModal(false)}
+        tripId={tripId}
+        onPlaceAdded={() => (tripActions as any).loadPlaces?.(tripId)}
       />
     </div>
   )

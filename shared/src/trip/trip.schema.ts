@@ -24,6 +24,8 @@ export const tripSchema = z.object({
   user_id: z.number(),
   title: z.string(),
   description: z.string().nullable().optional(),
+  origin_location: z.string().nullable().optional(),
+  destination_location: z.string().nullable().optional(),
   start_date: z.string().nullable().optional(),
   end_date: z.string().nullable().optional(),
   currency: z.string(),
@@ -74,6 +76,8 @@ export type TripRenameGuestRequest = z.infer<typeof tripRenameGuestRequestSchema
 export const tripCreateRequestSchema = z.object({
   title: z.string().min(1),
   description: z.string().nullable().optional(),
+  origin_location: z.string().nullable().optional(),
+  destination_location: z.string().nullable().optional(),
   start_date: z.string().nullable().optional(),
   end_date: z.string().nullable().optional(),
   currency: z.string().optional(),
@@ -86,6 +90,8 @@ export type TripCreateRequest = z.infer<typeof tripCreateRequestSchema>;
 export const tripUpdateRequestSchema = z.object({
   title: z.string().optional(),
   description: z.string().nullable().optional(),
+  origin_location: z.string().nullable().optional(),
+  destination_location: z.string().nullable().optional(),
   start_date: z.string().nullable().optional(),
   end_date: z.string().nullable().optional(),
   /**

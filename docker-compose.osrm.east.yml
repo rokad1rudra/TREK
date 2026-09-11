@@ -1,0 +1,10 @@
+services:
+  osrm-east:
+    image: osrm/osrm-backend:latest
+    container_name: trek_osrm_east
+    restart: unless-stopped
+    ports:
+      - "5003:5000"
+    volumes:
+      - ./osrm-data:/data
+    command: osrm-routed --algorithm mld -t 1 /data/eastern-zone-latest.osrm

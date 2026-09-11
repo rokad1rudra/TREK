@@ -176,6 +176,8 @@ export function listTrips(userId: number, archived: number | null) {
 interface CreateTripData {
   title: string;
   description?: string | null;
+  origin_location?: string | null;
+  destination_location?: string | null;
   start_date?: string | null;
   end_date?: string | null;
   currency?: string;
@@ -189,9 +191,9 @@ export function createTrip(userId: number, data: CreateTripData, maxDays?: numbe
     : 3;
 
   const result = db.prepare(`
-    INSERT INTO trips (user_id, title, description, start_date, end_date, currency, reminder_days)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(userId, data.title, data.description || null, data.start_date || null, data.end_date || null, data.currency || 'EUR', rd);
+    INSERT INTO trips (user_id, title, description, origin_location, destination_location, start_date, end_date, currency, reminder_days)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(userId, data.title, data.description || null, data.origin_location || null, data.destination_location || null, data.start_date || null, data.end_date || null, data.currency || 'EUR', rd);
 
   const tripId = result.lastInsertRowid;
   generateDays(tripId, data.start_date || null, data.end_date || null, maxDays, data.day_count);
@@ -211,6 +213,8 @@ export function getTrip(tripId: string | number, userId: number) {
 interface UpdateTripData {
   title?: string;
   description?: string;
+  origin_location?: string;
+  destination_location?: string;
   start_date?: string;
   end_date?: string;
   currency?: string;
@@ -232,16 +236,18 @@ export interface UpdateTripResult {
 }
 
 export function updateTrip(tripId: string | number, userId: number, data: UpdateTripData, userRole: string): UpdateTripResult {
-  const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(tripId) as Trip & { reminder_days?: number } | undefined;
+  const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(tripId) as Trip & { reminder_days?: number; origin_location?: string; destination_location?: string } | undefined;
   if (!trip) throw new NotFoundError('Trip not found');
 
-  const { title, description, start_date, end_date, currency, is_archived, cover_image, reminder_days } = data;
+  const { title, description, origin_location, destination_location, start_date, end_date, currency, is_archived, cover_image, reminder_days } = data;
 
   if (start_date && end_date && new Date(end_date) < new Date(start_date))
     throw new ValidationError('End date must be after start date');
 
   const newTitle = title || trip.title;
   const newDesc = description !== undefined ? description : trip.description;
+  const newOrigin = origin_location !== undefined ? origin_location : trip.origin_location;
+  const newDest = destination_location !== undefined ? destination_location : trip.destination_location;
   const newStart = start_date !== undefined ? start_date : trip.start_date;
   const newEnd = end_date !== undefined ? end_date : trip.end_date;
   const newCurrency = currency || trip.currency;
@@ -253,10 +259,10 @@ export function updateTrip(tripId: string | number, userId: number, data: Update
     : oldReminder;
 
   db.prepare(`
-    UPDATE trips SET title=?, description=?, start_date=?, end_date=?,
+    UPDATE trips SET title=?, description=?, origin_location=?, destination_location=?, start_date=?, end_date=?,
       currency=?, is_archived=?, cover_image=?, reminder_days=?, updated_at=CURRENT_TIMESTAMP
     WHERE id=?
-  `).run(newTitle, newDesc, newStart || null, newEnd || null, newCurrency, newArchived, newCover, newReminder, tripId);
+  `).run(newTitle, newDesc, newOrigin || null, newDest || null, newStart || null, newEnd || null, newCurrency, newArchived, newCover, newReminder, tripId);
 
   if (trip.start_date && trip.end_date && newStart && newStart !== trip.start_date)
     shiftOwnerEntriesForTripWindow(trip.user_id, trip.start_date, trip.end_date, newStart);

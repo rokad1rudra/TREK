@@ -16,7 +16,7 @@ if (isTest) {
 } else if (process.env.TREK_DB_FILE) {
   // Explicit DB file (used by the Playwright E2E harness to run against an
   // isolated, throwaway database instead of the real data/travel.db). Purely
-  // additive — when unset the default path below is used exactly as before.
+  // additive - when unset the default path below is used exactly as before.
   dbPath = process.env.TREK_DB_FILE;
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -39,6 +39,10 @@ function initDb(): void {
 
   _db = new Database(dbPath);
   _db.exec('PRAGMA journal_mode = WAL');
+  _db.exec('PRAGMA synchronous = NORMAL');
+  _db.exec('PRAGMA cache_size = -64000'); // 64 MB fast in-memory page cache
+  _db.exec('PRAGMA temp_store = MEMORY');
+  _db.exec('PRAGMA mmap_size = 268435456'); // 256 MB memory-mapped I/O
   _db.exec('PRAGMA busy_timeout = 5000');
   _db.exec('PRAGMA foreign_keys = ON');
 

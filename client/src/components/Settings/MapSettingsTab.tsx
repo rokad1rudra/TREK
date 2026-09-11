@@ -24,10 +24,11 @@ interface MapPreset {
 }
 
 const MAP_PRESETS: MapPreset[] = [
-  { name: 'OpenStreetMap', url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png' },
-  { name: 'OpenStreetMap DE', url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png' },
-  { name: 'CartoDB Light', url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png' },
-  { name: 'CartoDB Dark', url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' },
+  { name: 'Esri World Street Map (Ultra Fast Global CDN)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}' },
+  { name: 'OpenStreetMap Multi-Server (Fast & Free)', url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png' },
+  { name: 'OpenStreetMap Humanitarian', url: 'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png' },
+  { name: 'OpenStreetMap German Style', url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png' },
+  { name: 'OpenStreetMap France Style', url: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png' },
   { name: 'Stadia Smooth', url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png' },
 ]
 

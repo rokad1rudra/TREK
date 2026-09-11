@@ -232,7 +232,7 @@ export function useTripPlanner() {
   // Manual route planning: off by default, toggled from the day-plan footer. Mode
   // (driving/walking) is per-session and selects which travel time the connectors show.
   const [routeShown, setRouteShown] = useState(false)
-  const [routeProfile, setRouteProfile] = useState<'driving' | 'walking'>('driving')
+  const [routeProfile, setRouteProfile] = useState<'driving' | 'walking' | 'cycling'>('driving')
   const [fitKey, setFitKey] = useState<number>(0)
   const initialFitTripId = useRef<number | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<'left' | 'right' | null>(null)
@@ -909,7 +909,10 @@ export function useTripPlanner() {
     return da.map(a => a.place).filter(p => p?.lat && p?.lng)
   }, [selectedDayId, assignments])
 
-  const mapTileUrl = settings.map_tile_url || 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+  const rawTileUrl = settings.map_tile_url
+  const mapTileUrl = (rawTileUrl && !rawTileUrl.includes('cartocdn.com'))
+    ? rawTileUrl
+    : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 
   const fontStyle = { fontFamily: "var(--font-system)" }
 

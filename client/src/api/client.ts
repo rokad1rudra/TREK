@@ -44,6 +44,8 @@ import {
   type BookingImportPreviewResponse,
   type BookingImportConfirmResponse,
   type BookingImportMode,
+  type TripAiRecommendationsRequest,
+  type TripAiRecommendationsResult,
 } from '@trek/shared'
 import { getSocketId } from './websocket'
 import { probeNow } from '../sync/connectivity'
@@ -803,19 +805,77 @@ export const journeyApi = {
   getPublicJourney: (token: string) => apiClient.get(`/public/journey/${token}`).then(r => r.data),
 }
 
+const mapsCache = new Map<string, { data: any; exp: number }>()
+function getMapsCached<T>(key: string): T | null {
+  const item = mapsCache.get(key)
+  if (!item) return null
+  if (Date.now() > item.exp) {
+    mapsCache.delete(key)
+    return null
+  }
+  return item.data as T
+}
+function setMapsCache(key: string, data: any, ttlMs = 600_000): void {
+  if (mapsCache.size > 800) {
+    const oldest = mapsCache.keys().next().value
+    if (oldest) mapsCache.delete(oldest)
+  }
+  mapsCache.set(key, { data, exp: Date.now() + ttlMs })
+}
+
 export const mapsApi = {
-  search: (query: string, lang?: string) => apiClient.post(`/maps/search?lang=${lang || 'en'}`, { query }).then(r => checkInDev(mapsSearchResultSchema, r.data, 'maps.search')),
-  autocomplete: (input: string, lang?: string, locationBias?: { low: { lat: number; lng: number }; high: { lat: number; lng: number } }, signal?: AbortSignal) =>
-      apiClient.post('/maps/autocomplete', { input, lang, locationBias }, { signal }).then(r => checkInDev(mapsAutocompleteResultSchema, r.data, 'maps.autocomplete')),
-  details: (placeId: string, lang?: string) => apiClient.get(`/maps/details/${encodeURIComponent(placeId)}`, { params: { lang } }).then(r => checkInDev(mapsPlaceDetailsResultSchema, r.data, 'maps.details')),
+  search: (query: string, lang?: string) => {
+    const k = `search:${lang || 'en'}:${query.trim().toLowerCase()}`
+    const hit = getMapsCached(k)
+    if (hit) return Promise.resolve(hit)
+    return apiClient.post(`/maps/search?lang=${lang || 'en'}`, { query })
+      .then(r => checkInDev(mapsSearchResultSchema, r.data, 'maps.search'))
+      .then(res => { setMapsCache(k, res); return res })
+  },
+  autocomplete: (input: string, lang?: string, locationBias?: { low: { lat: number; lng: number }; high: { lat: number; lng: number } }, signal?: AbortSignal) => {
+    const k = `ac:${lang || 'en'}:${input.trim().toLowerCase()}:${locationBias ? JSON.stringify(locationBias) : ''}`
+    const hit = getMapsCached(k)
+    if (hit) return Promise.resolve(hit)
+    return apiClient.post('/maps/autocomplete', { input, lang, locationBias }, { signal })
+      .then(r => checkInDev(mapsAutocompleteResultSchema, r.data, 'maps.autocomplete'))
+      .then(res => { setMapsCache(k, res, 180_000); return res })
+  },
+  details: (placeId: string, lang?: string) => {
+    const k = `det:${lang || 'en'}:${placeId}`
+    const hit = getMapsCached(k)
+    if (hit) return Promise.resolve(hit)
+    return apiClient.get(`/maps/details/${encodeURIComponent(placeId)}`, { params: { lang } })
+      .then(r => checkInDev(mapsPlaceDetailsResultSchema, r.data, 'maps.details'))
+      .then(res => { setMapsCache(k, res); return res })
+  },
   placePhoto: (placeId: string, lat?: number, lng?: number, name?: string) => apiClient.get(`/maps/place-photo/${encodeURIComponent(placeId)}`, { params: { lat, lng, name } }).then(r => checkInDev(mapsPlacePhotoResultSchema, r.data, 'maps.placePhoto')),
-  reverse: (lat: number, lng: number, lang?: string) => apiClient.get('/maps/reverse', { params: { lat, lng, lang } }).then(r => checkInDev(mapsReverseResultSchema, r.data, 'maps.reverse')),
+  reverse: (lat: number, lng: number, lang?: string) => {
+    const k = `rev:${lang || 'en'}:${lat.toFixed(4)},${lng.toFixed(4)}`
+    const hit = getMapsCached(k)
+    if (hit) return Promise.resolve(hit)
+    return apiClient.get('/maps/reverse', { params: { lat, lng, lang } })
+      .then(r => checkInDev(mapsReverseResultSchema, r.data, 'maps.reverse'))
+      .then(res => { setMapsCache(k, res); return res })
+  },
   resolveUrl: (url: string) => apiClient.post('/maps/resolve-url', { url }).then(r => checkInDev(mapsResolveUrlResultSchema, r.data, 'maps.resolveUrl')),
   // OSM-only POI explore: places of a category within the current map viewport bbox.
-  // Overpass can be slow on a fresh (uncached) area, so this call gets a longer
-  // timeout than the global default instead of aborting at 8s and showing nothing.
-  pois: (category: string, bbox: { south: number; west: number; north: number; east: number }, signal?: AbortSignal) =>
-    apiClient.get('/maps/pois', { params: { category, ...bbox }, signal, timeout: 20000 }).then(r => r.data as { pois: import('../components/Map/poiCategories').Poi[]; source: string; truncated: boolean; clamped?: boolean }),
+  pois: (category: string, bbox: { south: number; west: number; north: number; east: number }, signal?: AbortSignal) => {
+    const k = `poi:${category}:${bbox.south.toFixed(3)},${bbox.west.toFixed(3)},${bbox.north.toFixed(3)},${bbox.east.toFixed(3)}`
+    const hit = getMapsCached(k)
+    if (hit) return Promise.resolve(hit)
+    return apiClient.get('/maps/pois', { params: { category, ...bbox }, signal, timeout: 20000 })
+      .then(r => r.data as { pois: import('../components/Map/poiCategories').Poi[]; source: string; truncated: boolean; clamped?: boolean })
+      .then(res => { setMapsCache(k, res, 300_000); return res })
+  },
+  route: (waypoints: Array<{ lat: number; lng: number }>, mode?: string) => {
+    const wpKey = waypoints.map(w => `${w.lat.toFixed(4)},${w.lng.toFixed(4)}`).join(';')
+    const k = `route:${mode || 'driving'}:${wpKey}`
+    const hit = getMapsCached(k)
+    if (hit) return Promise.resolve(hit)
+    return apiClient.post('/maps/route', { waypoints, mode })
+      .then(r => r.data as { geometry: [number, number][]; distance: number; duration: number; source: string; alternatives?: any[] })
+      .then(res => { setMapsCache(k, res, 900_000); return res })
+  },
 }
 
 export const airportsApi = {
@@ -1035,6 +1095,29 @@ export const inAppNotificationsApi = {
       apiClient.delete('/notifications/in-app/all').then(r => r.data),
   respond: (id: number, response: NotificationRespondRequest['response']) =>
       apiClient.post(`/notifications/in-app/${id}/respond`, { response }).then(r => r.data),
+}
+
+export const aiRecommendationsApi = {
+  generate: (tripId: number | string, data?: TripAiRecommendationsRequest): Promise<TripAiRecommendationsResult> =>
+    apiClient.post(`/trips/${tripId}/ai-recommendations`, data, { timeout: 120000 }).then(r => r.data),
+}
+
+export const mlApi = {
+  health: () => apiClient.get('/ml/health').then(r => r.data),
+  predictTrip: (payload: any) => apiClient.post('/trips/plan', payload, { timeout: 30000 }).then(r => r.data),
+  plan: (payload: any) => apiClient.post('/ml/plan', payload, { timeout: 30000 }).then(r => r.data),
+  getTransportOptions: (payload: any) => apiClient.post('/trips/transport', payload).then(r => r.data),
+  rankTransport: (payload: any) => apiClient.post('/trips/transport', payload).then(r => r.data),
+  calculateBudget: (payload: any) => apiClient.post('/trips/budget', payload).then(r => r.data),
+  estimateTrip: (payload: any) => apiClient.post('/trips/estimate', payload, { timeout: 30000 }).then(r => r.data),
+  getHotels: (payload: any) => apiClient.post('/trips/hotels', payload).then(r => r.data),
+  getActivities: (payload: any) => apiClient.post('/trips/activities', payload).then(r => r.data),
+  generateItinerary: (payload: any) => apiClient.post('/trips/itinerary', payload, { timeout: 30000 }).then(r => r.data),
+  optimizeItinerary: (payload: any) => apiClient.post('/trips/itinerary', payload, { timeout: 30000 }).then(r => r.data),
+  predictCost: (payload: any) => apiClient.post('/ml/cost', payload).then(r => r.data),
+  predictTransport: (payload: any) => apiClient.post('/ml/transport', payload).then(r => r.data),
+  predictHotel: (payload: any) => apiClient.post('/ml/hotel', payload).then(r => r.data),
+  predictActivity: (payload: any) => apiClient.post('/ml/activity', payload).then(r => r.data),
 }
 
 export default apiClient

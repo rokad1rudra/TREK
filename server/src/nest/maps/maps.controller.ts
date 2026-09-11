@@ -67,8 +67,8 @@ export class MapsController {
     try {
       return await this.maps.search(user.id, query as string, lang, locationBias);
     } catch (err: unknown) {
-      console.error('Maps search error:', err);
-      throw toHttpException(err, 'Search error', 500);
+      console.warn('[MapsController] Maps search warning/timeout:', err);
+      return [] as unknown as MapsSearchResult;
     }
   }
 
@@ -219,6 +219,24 @@ export class MapsController {
       const message = err instanceof Error ? err.message : 'Failed to resolve URL';
       console.error('[Maps] URL resolve error:', message);
       throw toHttpException(err, 'Failed to resolve URL', 400);
+    }
+  }
+
+  @Post('route')
+  @HttpCode(200)
+  async route(
+    @Body('waypoints') waypoints: unknown,
+    @Body('mode') mode?: 'driving' | 'walking' | 'bicycling' | 'cycling',
+  ) {
+    if (!Array.isArray(waypoints) || waypoints.length < 2) {
+      throw new HttpException({ error: 'Waypoints array with at least 2 points is required' }, 400);
+    }
+    try {
+      return await this.maps.route(waypoints as Array<{ lat: number; lng: number }>, mode);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Routing failed';
+      console.error('[Maps] OSRM route error:', message);
+      throw toHttpException(err, 'Routing failed', 400);
     }
   }
 }

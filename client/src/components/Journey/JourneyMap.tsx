@@ -169,9 +169,7 @@ const JourneyMap = forwardRef<JourneyMapHandle, Props>(function JourneyMap(
     })
     mapRef.current = map
 
-    const defaultTile = dark
-      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-      : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'
+    const defaultTile = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
     L.tileLayer(mapTileUrl || defaultTile, {
       maxZoom: 18,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',

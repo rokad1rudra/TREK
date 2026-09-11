@@ -3,7 +3,7 @@ import { useAddonStore } from '../../store/addonStore'
 import { usePluginStore } from '../../store/pluginStore'
 import { useSettingsStore } from '../../store/settingsStore'
 import { useTranslation } from '../../i18n'
-import { LayoutGrid, CalendarDays, Globe, Compass, Bookmark, Plus } from 'lucide-react'
+import { LayoutGrid, CalendarDays, Globe, Compass, Bookmark, Plus, Sparkles } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { resolvePluginIcon } from '../shared/PluginIcon'
 
@@ -66,6 +66,7 @@ export default function BottomNav() {
       const nav = ADDON_NAV[addon.id]
       return nav ? [{ to: `/${addon.id}`, label: t(nav.labelKey), icon: nav.icon }] : []
     }),
+    { to: '/ai-planner', label: 'AI Planner', icon: Sparkles },
     ...pagePlugins.map(p => ({ to: `/plugins/${p.id}`, label: p.name, icon: resolvePluginIcon(p.icon) })),
   ]
   // Split the items so the raised "+" sits dead centre.

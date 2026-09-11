@@ -13,6 +13,7 @@ export * from './common/pagination.schema';
 
 // Domain contracts
 export * from './weather/weather.schema';
+export * from './ai-recommendation/ai-recommendation.schema';
 export * from './airport/airport.schema';
 export * from './config/config.schema';
 export * from './system-notice/system-notice.schema';

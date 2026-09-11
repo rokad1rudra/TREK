@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import Modal from '../shared/Modal'
-import { Calendar, Camera, Search, X, UserPlus, Bell } from 'lucide-react'
-import { tripsApi, authApi } from '../../api/client'
+import { Calendar, Camera, Search, X, UserPlus, Bell, MapPin, Navigation, Compass, Loader2, Map } from 'lucide-react'
+import { tripsApi, authApi, mapsApi } from '../../api/client'
+import LocationMapPickerModal from './LocationMapPickerModal'
 import CustomSelect from '../shared/CustomSelect'
 import { useAuthStore } from '../../store/authStore'
 import { useCanDo } from '../../store/permissionsStore'
@@ -39,8 +40,9 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
   const isEditing = !!trip
   const fileRef = useRef(null)
   const coverSearchSeq = useRef(0)
+  const destDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const toast = useToast()
-  const { t } = useTranslation()
+  const { t, language } = useTranslation()
   const currentUser = useAuthStore(s => s.user)
   const tripRemindersEnabled = useAuthStore(s => s.tripRemindersEnabled)
   const setTripRemindersEnabled = useAuthStore(s => s.setTripRemindersEnabled)
@@ -51,12 +53,19 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
   const [formData, setFormData] = useState({
     title: '',
     description: '',
+    origin_location: '',
+    destination_location: '',
     start_date: '',
     end_date: '',
     currency: 'EUR',
     reminder_days: 0 as number,
     day_count: 7 as number | '',
   })
+  const [isDetectingLocation, setIsDetectingLocation] = useState(false)
+  const [destSuggestions, setDestSuggestions] = useState<{ placeId: string; mainText: string; secondaryText: string }[]>([])
+  const [isSearchingDest, setIsSearchingDest] = useState(false)
+  const [isMapPickerOpen, setIsMapPickerOpen] = useState(false)
+  const [mapPickerTarget, setMapPickerTarget] = useState<'origin' | 'destination'>('destination')
   const [customReminder, setCustomReminder] = useState(false)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -80,9 +89,29 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
   useEffect(() => {
     if (trip) {
       const rd = trip.reminder_days ?? 3
+      let orig = (trip as any).origin_location || ''
+      let dest = (trip as any).destination_location || ''
+
+      if (!orig && trip.description) {
+        const match = trip.description.match(/from\s+([^,\n]+(?:,[^\n]+)?)\s+to\s+([^,\n\.]+)/i)
+        if (match) {
+          orig = match[1].trim()
+          if (!dest) dest = match[2].trim()
+        }
+      }
+      if (!dest && trip.title) {
+        const matchTitle = trip.title.match(/(\d+-Day\s+)?(.+?)\s+to\s+(.+?)(\s+Adventure|\s+Trip)?$/i)
+        if (matchTitle) {
+          if (!orig) orig = matchTitle[2].trim()
+          dest = matchTitle[3].trim()
+        }
+      }
+
       setFormData({
         title: trip.title || '',
         description: trip.description || '',
+        origin_location: orig,
+        destination_location: dest,
         start_date: trip.start_date || '',
         end_date: trip.end_date || '',
         currency: trip.currency || 'EUR',
@@ -93,7 +122,17 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
       setCoverPreview(trip.cover_image || null)
       setCoverSearchQuery('')
     } else {
-      setFormData({ title: '', description: '', start_date: '', end_date: '', currency: 'EUR', reminder_days: tripRemindersEnabled ? 3 : 0, day_count: 7 })
+      setFormData({
+        title: '',
+        description: '',
+        origin_location: '',
+        destination_location: '',
+        start_date: '',
+        end_date: '',
+        currency: 'EUR',
+        reminder_days: tripRemindersEnabled ? 3 : 0,
+        day_count: 7
+      })
       setCustomReminder(false)
       setCoverPreview(null)
       setCoverSearchQuery('')
@@ -105,6 +144,7 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
     setSelectedMembers([])
     setPendingDateShift(null)
     setDateShiftMode('keep_bookings')
+    setDestSuggestions([])
     setError('')
     if (isOpen) {
       authApi.getAppConfig().then((c: { trip_reminders_enabled?: boolean }) => {
@@ -125,6 +165,95 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
     }
   }, [tripRemindersEnabled])
 
+  const handleDetectCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      toast.error(t('dashboard.locationDenied'))
+      return
+    }
+    setIsDetectingLocation(true)
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords
+        try {
+          const revRes = await mapsApi.reverse(latitude, longitude, language || 'en')
+          if (revRes?.address || revRes?.name) {
+            const locName = revRes.address || revRes.name
+            update('origin_location', locName)
+            toast.success(t('dashboard.locationDetected'))
+          } else {
+            toast.error(t('dashboard.locationDenied'))
+          }
+        } catch {
+          toast.error(t('dashboard.locationDenied'))
+        } finally {
+          setIsDetectingLocation(false)
+        }
+      },
+      (err) => {
+        console.warn('Geolocation error:', err)
+        setIsDetectingLocation(false)
+        toast.error(t('dashboard.locationDenied'))
+      },
+      { timeout: 10000, enableHighAccuracy: true }
+    )
+  }
+
+  const handleDestinationChange = (val: string) => {
+    update('destination_location', val)
+    if (destDebounceRef.current) clearTimeout(destDebounceRef.current)
+    if (val.trim().length < 2) {
+      setDestSuggestions([])
+      return
+    }
+    destDebounceRef.current = setTimeout(async () => {
+      setIsSearchingDest(true)
+      try {
+        const res = await mapsApi.autocomplete(val.trim(), language || 'en')
+        setDestSuggestions(res.suggestions || [])
+      } catch {
+        setDestSuggestions([])
+      } finally {
+        setIsSearchingDest(false)
+      }
+    }, 300)
+  }
+
+  const handleSelectDestination = (s: { mainText: string; secondaryText: string }) => {
+    const fullLoc = [s.mainText, s.secondaryText].filter(Boolean).join(', ')
+    update('destination_location', fullLoc)
+    setDestSuggestions([])
+    const isTitleDefaultOrCoords = !formData.title.trim() || formData.title.startsWith('Trip to ') || /^Trip to \d+/.test(formData.title)
+    if (isTitleDefaultOrCoords) {
+      update('title', `Trip to ${s.mainText}`)
+    }
+    setCoverSearchQuery(s.mainText)
+    tripsApi.searchCoverImages(s.mainText).then(data => {
+      setCoverSearchResults(data.photos || [])
+    }).catch(() => {})
+  }
+
+  const openMapPicker = (target: 'origin' | 'destination') => {
+    setMapPickerTarget(target)
+    setIsMapPickerOpen(true)
+  }
+
+  const handleMapLocationSelect = (locName: string) => {
+    if (mapPickerTarget === 'origin') {
+      update('origin_location', locName)
+    } else {
+      update('destination_location', locName)
+      const cityPart = locName.split(',')[0].trim()
+      const isTitleDefaultOrCoords = !formData.title.trim() || formData.title.startsWith('Trip to ') || /^Trip to \d+/.test(formData.title)
+      if (isTitleDefaultOrCoords) {
+        update('title', `Trip to ${cityPart}`)
+      }
+      setCoverSearchQuery(cityPart)
+      tripsApi.searchCoverImages(cityPart).then(data => {
+        setCoverSearchResults(data.photos || [])
+      }).catch(() => {})
+    }
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
@@ -141,6 +270,8 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
     const payload: TripCreateRequest & { date_shift_mode?: DateShiftMode } = {
       title: formData.title.trim(),
       description: formData.description.trim() || null,
+      origin_location: formData.origin_location.trim() || null,
+      destination_location: formData.destination_location.trim() || null,
       start_date: formData.start_date || null,
       end_date: formData.end_date || null,
       currency: formData.currency,
@@ -483,6 +614,112 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
             className={`${inputCls} resize-none`} />
         </div>
 
+        {/* Trip Locations Card */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+              <Compass className="w-3.5 h-3.5 text-indigo-500" />
+              {t('dashboard.tripRoute')}
+            </span>
+            <button
+              type="button"
+              onClick={handleDetectCurrentLocation}
+              disabled={isDetectingLocation}
+              className="px-2.5 py-1 text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border border-indigo-200 rounded-md font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              title="Detect current location via GPS"
+            >
+              {isDetectingLocation ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Navigation className="w-3 h-3" />
+              )}
+              {isDetectingLocation ? t('dashboard.detectingLocation') : t('dashboard.useCurrentLocation')}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Start / Origin Location */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-medium text-slate-700">
+                  {t('dashboard.currentLocation')}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => openMapPicker('origin')}
+                  className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium flex items-center gap-1 transition-colors"
+                >
+                  <Map className="w-3 h-3 text-indigo-500" />
+                  Pick via Map
+                </button>
+              </div>
+              <input
+                type="text"
+                value={formData.origin_location}
+                onChange={e => canEditTrip && update('origin_location', e.target.value)}
+                readOnly={!canEditTrip}
+                placeholder={t('dashboard.currentLocationPlaceholder')}
+                className={inputCls}
+              />
+            </div>
+
+            {/* Destination Location */}
+            <div className="relative">
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-medium text-slate-700">
+                  {t('dashboard.selectLocation')}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => openMapPicker('destination')}
+                  className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium flex items-center gap-1 transition-colors"
+                >
+                  <Map className="w-3 h-3 text-indigo-500" />
+                  Pick via Map
+                </button>
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={formData.destination_location}
+                  onChange={e => canEditTrip && handleDestinationChange(e.target.value)}
+                  onBlur={() => setTimeout(() => setDestSuggestions([]), 200)}
+                  readOnly={!canEditTrip}
+                  placeholder={t('dashboard.selectLocationPlaceholder')}
+                  className={inputCls}
+                />
+                {isSearchingDest && (
+                  <div className="absolute right-2.5 top-0 bottom-0 flex items-center">
+                    <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                  </div>
+                )}
+              </div>
+
+              {/* Autocomplete Dropdown */}
+              {destSuggestions.length > 0 && (
+                <div className="absolute left-0 right-0 z-30 mt-1 bg-white rounded-lg border border-slate-200 shadow-xl overflow-hidden max-h-48 overflow-y-auto">
+                  {destSuggestions.map((s) => (
+                    <button
+                      key={s.placeId}
+                      type="button"
+                      onMouseDown={() => handleSelectDestination(s)}
+                      className="w-full text-left px-3 py-2 border-b border-slate-100 last:border-0 hover:bg-slate-50 flex items-start gap-2 transition-colors"
+                    >
+                      <MapPin className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+                      <div>
+                        <div className="font-medium text-sm text-slate-800">{s.mainText}</div>
+                        {s.secondaryText && (
+                          <div className="text-xs text-slate-500 truncate">{s.secondaryText}</div>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1.5">
@@ -658,6 +895,14 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
         )}
 
       </form>
+
+      <LocationMapPickerModal
+        isOpen={isMapPickerOpen}
+        onClose={() => setIsMapPickerOpen(false)}
+        onSelectLocation={handleMapLocationSelect}
+        title={mapPickerTarget === 'origin' ? 'Pick Start Location on Map' : 'Pick Destination Location on Map'}
+        initialQuery={mapPickerTarget === 'origin' ? formData.origin_location : formData.destination_location}
+      />
     </Modal>
   )
 }

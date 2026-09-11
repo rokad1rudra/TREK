@@ -31,6 +31,7 @@ import { convertDistance, getDistanceUnitLabel } from '../utils/units'
 import { useSettingsStore } from '../store/settingsStore'
 import { useAddonStore } from '../store/addonStore'
 import { normalizeAppearance } from '@trek/shared'
+import { resolveTripCover, DEFAULT_FALLBACK_COVER, LiveTripCoverImage } from '../utils/destinationCovers'
 import '../styles/dashboard.css'
 
 const GRADIENTS = [
@@ -70,6 +71,88 @@ function fullDate(dateStr: string | null | undefined, locale: string): string | 
   const opts: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short', timeZone: 'UTC' }
   if (date.getUTCFullYear() !== new Date().getUTCFullYear()) opts.year = 'numeric'
   return date.toLocaleDateString(locale, opts)
+}
+
+// Clean location to extract the primary single city/word (e.g. "Mumbai, Mumbai Suburban District, Maharashtra, India" -> "Mumbai")
+export function cleanLocationName(loc?: string | null): string {
+  if (!loc) return ''
+  const trimmed = loc.trim()
+  if (!trimmed) return ''
+  // Take first comma-separated segment
+  const firstSegment = trimmed.split(',')[0].trim()
+  // Clean off any hyphens or arrow characters inside the segment
+  const clean = firstSegment.split(/[-–—→]/)[0].trim()
+  return clean || firstSegment || trimmed
+}
+
+export function getTripLocationRoute(trip: { origin_location?: string | null; destination_location?: string | null; title?: string | null; description?: string | null }): string {
+  let orig = trip.origin_location || ''
+  let dest = trip.destination_location || ''
+
+  if (!orig && trip.description) {
+    const match = trip.description.match(/from\s+([^,\n]+(?:,[^\n]+)?)\s+to\s+([^,\n\.]+)/i)
+    if (match) {
+      orig = match[1].trim()
+      if (!dest) dest = match[2].trim()
+    }
+  }
+  if (!dest && trip.title) {
+    const matchTitle = trip.title.match(/(\d+-Day\s+)?(.+?)\s+to\s+(.+?)(\s+Adventure|\s+Trip)?$/i)
+    if (matchTitle) {
+      if (!orig) orig = matchTitle[2].trim()
+      dest = matchTitle[3].trim()
+    }
+  }
+
+  const origCity = cleanLocationName(orig)
+  const destCity = cleanLocationName(dest)
+
+  if (origCity && destCity) {
+    if (origCity.toLowerCase() === destCity.toLowerCase()) return origCity
+    return `${origCity} → ${destCity}`
+  }
+  return destCity || origCity || ''
+}
+
+// Always compute actual start and end dates (e.g. "25 Aug → 30 Aug")
+export function getTripDisplayDates(trip: DashboardTrip, locale: string): {
+  startStr: string
+  endStr: string
+  startSplit: { d: string; m: string; y: string } | null
+  endSplit: { d: string; m: string; y: string } | null
+} {
+  let startRaw = trip.start_date
+  let endRaw = trip.end_date
+  const days = Math.max(1, trip.day_count || 1)
+
+  if (!startRaw) {
+    if (trip.created_at) {
+      startRaw = trip.created_at.split('T')[0]
+    } else {
+      startRaw = new Date().toISOString().split('T')[0]
+    }
+  }
+
+  if (!endRaw) {
+    try {
+      const s = new Date(startRaw + 'T00:00:00Z')
+      if (!isNaN(s.getTime())) {
+        const e = new Date(s.getTime() + (days - 1) * 86400000)
+        endRaw = e.toISOString().split('T')[0]
+      } else {
+        endRaw = startRaw
+      }
+    } catch {
+      endRaw = startRaw
+    }
+  }
+
+  return {
+    startStr: fullDate(startRaw, locale) || startRaw,
+    endStr: fullDate(endRaw, locale) || endRaw,
+    startSplit: splitDate(startRaw, locale),
+    endSplit: splitDate(endRaw, locale),
+  }
 }
 
 function buddyColor(seed: number): string {
@@ -308,8 +391,9 @@ function BoardingPassHero({ trip, bundle, locale, onOpen, onEdit, onCopy, onArch
   const heroPlugins = usePluginStore(s => s.plugins).filter(p => p.type === 'widget' && p.slot === 'hero')
   const stop = (e: React.MouseEvent, fn: () => void) => { e.stopPropagation(); fn() }
   const status = getTripStatus(trip)
-  const start = splitDate(trip.start_date, locale)
-  const end = splitDate(trip.end_date, locale)
+  const tripDates = getTripDisplayDates(trip, locale)
+  const start = tripDates.startSplit
+  const end = tripDates.endSplit
 
   // Countdown cell — plain text in the same style as the trip-dates cell:
   // days remaining while the trip runs, days until departure before it starts.
@@ -398,9 +482,11 @@ function BoardingPassHero({ trip, bundle, locale, onOpen, onEdit, onCopy, onArch
   return (
     <>
     <section className="hero-trip" onClick={onOpen}>
-      {trip.cover_image
-        ? <img className="bg" src={trip.cover_image} alt={trip.title} />
-        : <div className="bg" style={{ background: tripGradient(trip.id) }} />}
+      <LiveTripCoverImage
+        trip={trip}
+        className="bg"
+        alt={trip.title}
+      />
       <div className="scrim" />
       <div className="hero-content">
         <div className="hero-top">
@@ -545,9 +631,9 @@ function TripCard({ trip, locale, badges, onOpen, onEdit, onCopy, onArchive, onD
 }): React.ReactElement {
   const { t } = useTranslation()
   const status = getTripStatus(trip)
-  const start = splitDate(trip.start_date, locale)
-  const end = splitDate(trip.end_date, locale)
-  const until = daysUntil(trip.start_date)
+  const tripDates = getTripDisplayDates(trip, locale)
+  const until = daysUntil(trip.start_date || (trip.created_at ? trip.created_at.split('T')[0] : null))
+  const routeText = getTripLocationRoute(trip)
 
   const statusClass = status === 'ongoing' ? '' : status === 'past' ? 'completed' : status === 'future' || status === 'today' || status === 'tomorrow' ? 'upcoming' : 'idea'
   const statusLabel = status === 'ongoing' ? t('dashboard.mobile.liveNow')
@@ -561,37 +647,52 @@ function TripCard({ trip, locale, badges, onOpen, onEdit, onCopy, onArchive, onD
 
   return (
     <article className="trip-card" onClick={onOpen}>
+      {/* 1. Full-frame background image */}
       <div className="trip-cover">
-        {trip.cover_image
-          ? <img src={trip.cover_image} alt={trip.title} />
-          : <div style={{ width: '100%', height: '100%', background: tripGradient(trip.id) }} />}
-        <div className={`trip-status ${statusClass}`}><span className="indicator" /> {statusLabel}</div>
+        <LiveTripCoverImage
+          trip={trip}
+          alt={trip.title}
+        />
+      </div>
+
+      {/* 2. Top Header Row: Status Badge (left) & Actions (right) */}
+      <div className="trip-card-top">
+        <div className={`trip-status ${statusClass}`}>
+          <span className="indicator" /> {statusLabel}
+        </div>
         <div className="trip-actions">
           <button className="trip-action-btn" aria-label={t('common.edit')} onClick={(e) => stop(e, onEdit)}><Edit2 size={16} /></button>
           <button className="trip-action-btn" aria-label={t('dashboard.aria.duplicate')} onClick={(e) => stop(e, onCopy)}><Copy size={16} /></button>
           <button className="trip-action-btn" aria-label={trip.is_archived ? t('dashboard.restore') : t('dashboard.archive')} onClick={(e) => stop(e, onArchive)}><Archive size={16} /></button>
           <button className="trip-action-btn" aria-label={t('common.delete')} onClick={(e) => stop(e, onDelete)}><Trash2 size={16} /></button>
         </div>
-        <div className="trip-cover-content">
-          <h3 className="trip-name">{trip.title}</h3>
-        </div>
       </div>
-      <div className="trip-body">
-        <div className="trip-dates">
-          {start && end ? (
-            <>
-              <span className="date-num">{fullDate(trip.start_date, locale)}</span>
-              <span className="date-arrow"><ArrowRight size={11} /></span>
-              <span className="date-num">{fullDate(trip.end_date, locale)}</span>
-            </>
-          ) : <span>{t('dashboard.hero.noDates')}</span>}
+
+      {/* 3. Bottom Container: Anchored firmly at the bottom of the card */}
+      <div className="trip-bottom-wrap">
+        <div className="trip-info-header">
+          <h3 className="trip-name">{trip.title}</h3>
+          {routeText && (
+            <div className="trip-where">
+              <MapPin size={12} className="shrink-0 text-red-400" />
+              <span className="truncate">{routeText}</span>
+            </div>
+          )}
         </div>
-        <div className="trip-meta" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          <div><span className="n mono">{trip.day_count ?? 0}</span><span className="k">{t('dashboard.days')}</span></div>
-          <div><span className="n mono">{trip.place_count ?? 0}</span><span className="k">{t('dashboard.places')}</span></div>
-          <div><span className="n mono">{trip.shared_count ?? 0}</span><span className="k">{trip.shared_count === 1 ? t('dashboard.card.buddyOne') : t('dashboard.members')}</span></div>
+
+        <div className="trip-body">
+          <div className="trip-dates">
+            <span className="date-num">{tripDates.startStr}</span>
+            <span className="date-arrow"><ArrowRight size={12} /></span>
+            <span className="date-num">{tripDates.endStr}</span>
+          </div>
+          <div className="trip-meta" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+            <div><span className="n mono">{trip.day_count ?? 0}</span><span className="k">{t('dashboard.days')}</span></div>
+            <div><span className="n mono">{trip.place_count ?? 0}</span><span className="k">{t('dashboard.places')}</span></div>
+            <div><span className="n mono">{trip.shared_count ?? 0}</span><span className="k">{trip.shared_count === 1 ? t('dashboard.card.buddyOne') : t('dashboard.members')}</span></div>
+          </div>
+          <TripCardBadges items={badges ?? []} />
         </div>
-        <TripCardBadges items={badges ?? []} />
       </div>
     </article>
   )

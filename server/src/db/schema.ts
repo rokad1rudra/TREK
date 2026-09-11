@@ -83,6 +83,8 @@ function createTables(db: Database.Database): void {
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       description TEXT,
+      origin_location TEXT,
+      destination_location TEXT,
       start_date TEXT,
       end_date TEXT,
       currency TEXT DEFAULT 'EUR',
@@ -593,6 +595,9 @@ function createTables(db: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS migrations (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, timestamp bigint NOT NULL, name varchar NOT NULL);
   `);
+
+  try { db.exec('ALTER TABLE trips ADD COLUMN origin_location TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE trips ADD COLUMN destination_location TEXT;'); } catch {}
 }
 
 export { createTables };

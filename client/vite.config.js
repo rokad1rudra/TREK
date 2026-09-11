@@ -1,6 +1,7 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import http from 'node:http';
 
 export default defineConfig({
   plugins: [
@@ -21,26 +22,13 @@ export default defineConfig({
         ],
         runtimeCaching: [
           {
-            // Carto map tiles (default provider)
-            // maxEntries MUST stay >= MAX_TILES in src/sync/tilePrefetcher.ts
-            // (both are 12288) so prefetched tiles aren't evicted on arrival.
-            urlPattern: /^https:\/\/[a-d]\.basemaps\.cartocdn\.com\/.*/i,
+            // Fast Map Tile Cache (Carto, OpenStreetMap, Esri, Wikimedia, Stadia)
+            // CacheFirst ensures tiles load in ~0ms from local CacheStorage
+            urlPattern: /^https:\/\/(.*\.tile\.openstreetmap\.(org|de|fr)|[a-d]\.basemaps\.cartocdn\.com|server\.arcgisonline\.com|.*\.tile\.stadiamaps\.com|upload\.wikimedia\.org)\/.*/i,
             handler: 'CacheFirst',
             options: {
               cacheName: 'map-tiles',
-              expiration: { maxEntries: 12288, maxAgeSeconds: 30 * 24 * 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // OpenStreetMap tiles (fallback / alternative)
-            // Shares the 'map-tiles' cache; keep maxEntries equal to the Carto
-            // rule above and MAX_TILES in src/sync/tilePrefetcher.ts (12288).
-            urlPattern: /^https:\/\/[a-c]\.tile\.openstreetmap\.org\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'map-tiles',
-              expiration: { maxEntries: 12288, maxAgeSeconds: 30 * 24 * 60 * 60 },
+              expiration: { maxEntries: 25000, maxAgeSeconds: 60 * 24 * 60 * 60 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },
@@ -96,9 +84,9 @@ export default defineConfig({
         ],
       },
       manifest: {
-        name: 'TREK \u2014 Travel Planner',
-        short_name: 'TREK',
-        description: 'Travel Resource & Exploration Kit',
+        name: 'GlobeTrotter — Travel Planner',
+        short_name: 'GlobeTrotter',
+        description: 'Plan and organize every journey in one place.',
         theme_color: '#111827',
         background_color: '#0f172a',
         display: 'standalone',
@@ -121,50 +109,107 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:3001',
+    proxy: (function () {
+      let lastRefusedLog = 0;
+      const REFUSED_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENOTFOUND', 'ETIMEDOUT']);
+
+      const retryHttpRequest = (req, res, attempt = 1, maxAttempts = 6) => {
+        if (!res || typeof res.writeHead !== 'function' || res.headersSent) return;
+
+        const options = {
+          hostname: '127.0.0.1',
+          port: 3001,
+          path: req.url,
+          method: req.method,
+          headers: { ...req.headers, host: '127.0.0.1:3001' },
+        };
+
+        const clientReq = http.request(options, (backendRes) => {
+          if (!res.headersSent) {
+            res.writeHead(backendRes.statusCode, backendRes.headers);
+            backendRes.pipe(res);
+          }
+        });
+
+        clientReq.on('error', (err) => {
+          if (attempt < maxAttempts) {
+            const backoff = Math.min(250 * attempt, 1000);
+            setTimeout(() => {
+              retryHttpRequest(req, res, attempt + 1, maxAttempts);
+            }, backoff);
+          } else {
+            const now = Date.now();
+            if (now - lastRefusedLog > 30000) {
+              console.warn('[vite] Backend server (127.0.0.1:3001) is offline or unreachable.');
+              lastRefusedLog = now;
+            }
+            if (!res.headersSent) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Backend server is starting up. Please wait...' }));
+            }
+          }
+        });
+
+        if (['GET', 'HEAD', 'OPTIONS', 'DELETE'].includes(req.method)) {
+          clientReq.end();
+        } else {
+          try {
+            req.pipe(clientReq);
+          } catch {
+            clientReq.end();
+          }
+        }
+      };
+
+      const handleProxyError = (err, req, res) => {
+        if (err && REFUSED_CODES.has(err.code)) {
+          if (res && typeof res.writeHead === 'function' && !res.headersSent) {
+            retryHttpRequest(req, res);
+          } else if (res && typeof res.destroy === 'function') {
+            res.destroy();
+          }
+          return;
+        }
+        console.error(`[vite] http proxy error for ${req?.url || 'request'}:`, err?.message || err);
+      };
+
+      const configureProxy = (proxy) => {
+        const origEmit = proxy.emit;
+        proxy.emit = function (event, err, req, res) {
+          if (event === 'error' && err && REFUSED_CODES.has(err.code)) {
+            handleProxyError(err, req, res);
+            return true;
+          }
+          return origEmit.apply(this, arguments);
+        };
+      };
+
+      const proxyRule = {
+        target: 'http://127.0.0.1:3001',
         changeOrigin: true,
-      },
-      '/plugin-frame': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      '/uploads': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      '/ws': {
-        target: 'http://localhost:3001',
+        configure: configureProxy,
+        onError: handleProxyError,
+      };
+
+      const wsProxyRule = {
+        target: 'http://127.0.0.1:3001',
         ws: true,
-      },
-      '/mcp': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      // OAuth 2.1 endpoints handled by backend (SDK authorize handler + token/revoke)
-      // /oauth/authorize goes to backend so the SDK can redirect to /oauth/consent
-      // /oauth/consent is served by Vite as a SPA route (no proxy entry needed)
-      '/oauth/authorize': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      '/oauth/token': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      '/oauth/register': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      '/oauth/revoke': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-      '/.well-known': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-    },
+        configure: configureProxy,
+        onError: handleProxyError,
+      };
+
+      return {
+        '/api': proxyRule,
+        '/plugin-frame': proxyRule,
+        '/uploads': proxyRule,
+        '/ws': wsProxyRule,
+        '/mcp': proxyRule,
+        '/oauth/authorize': proxyRule,
+        '/oauth/token': proxyRule,
+        '/oauth/register': proxyRule,
+        '/oauth/revoke': proxyRule,
+        '/.well-known': proxyRule,
+      };
+    })(),
   },
 });

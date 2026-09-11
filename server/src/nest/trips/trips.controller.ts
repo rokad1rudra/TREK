@@ -30,6 +30,7 @@ import { writeAudit, getClientIp, logInfo } from '../../services/auditLog';
 import { isDemoEmail } from '../../services/demo';
 import { NotFoundError, ValidationError } from '../../services/tripService';
 import { saveUnsplashCover, isUnsplashCoverUrl } from '../../services/unsplashService';
+import { mlServiceClient } from '../../services/mlServiceClient';
 
 const MAX_COVER_SIZE = 20 * 1024 * 1024;
 const coversDir = path.join(__dirname, '../../../uploads/covers');
@@ -87,13 +88,131 @@ export class TripsController {
     }
   }
 
+  @Post('plan')
+  @HttpCode(200)
+  async plan(@Body() body: any) {
+    if (!body || (!body.message && (!body.origin || !body.destination))) {
+      throw new HttpException({ error: 'Please provide either a message prompt or origin and destination' }, 400);
+    }
+    try {
+      return await mlServiceClient.planMaster(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to generate ML trip plan', detail: String(err) },
+        500,
+      );
+    }
+  }
+
+  @Post('transport')
+  @HttpCode(200)
+  async getTransport(@Body() body: any) {
+    if (!body || !body.origin || !body.destination) {
+      throw new HttpException({ error: 'Origin and Destination are required' }, 400);
+    }
+    try {
+      if (body.options && Array.isArray(body.options)) {
+        return await mlServiceClient.rankTransport(body);
+      }
+      return await mlServiceClient.getTransportOptions(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to process transport request', detail: String(err) },
+        500,
+      );
+    }
+  }
+
+  @Post('budget')
+  @HttpCode(200)
+  async calculateBudget(@Body() body: any) {
+    if (!body || !body.origin || !body.destination) {
+      throw new HttpException({ error: 'Origin and Destination are required' }, 400);
+    }
+    try {
+      return await mlServiceClient.calculateBudget(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to calculate budget breakdown', detail: String(err) },
+        500,
+      );
+    }
+  }
+
+  @Post('estimate')
+  @HttpCode(200)
+  async estimateTrip(@Body() body: any) {
+    if (!body || !body.origin || !body.destination) {
+      throw new HttpException({ error: 'Origin and Destination are required' }, 400);
+    }
+    try {
+      return await mlServiceClient.estimateTrip(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to estimate trip parameters', detail: String(err) },
+        500,
+      );
+    }
+  }
+
+  @Post('hotels')
+  @HttpCode(200)
+  async getHotels(@Body() body: any) {
+    if (!body || !body.destination) {
+      throw new HttpException({ error: 'Destination is required' }, 400);
+    }
+    try {
+      return await mlServiceClient.recommendHotels(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to recommend hotels', detail: String(err) },
+        500,
+      );
+    }
+  }
+
+  @Post('activities')
+  @HttpCode(200)
+  async getActivities(@Body() body: any) {
+    if (!body || !body.destination) {
+      throw new HttpException({ error: 'Destination is required' }, 400);
+    }
+    try {
+      return await mlServiceClient.recommendActivities(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to recommend activities', detail: String(err) },
+        500,
+      );
+    }
+  }
+
+  @Post('itinerary')
+  @HttpCode(200)
+  async getItinerary(@Body() body: any) {
+    if (!body || !body.origin || !body.destination) {
+      throw new HttpException({ error: 'Origin and Destination are required' }, 400);
+    }
+    try {
+      if (body.itinerary) {
+        return await mlServiceClient.optimizeItinerary(body);
+      }
+      return await mlServiceClient.generateItinerary(body);
+    } catch (err: unknown) {
+      throw new HttpException(
+        { error: 'Failed to process itinerary request', detail: String(err) },
+        500,
+      );
+    }
+  }
+
   @Post()
   @HttpCode(201)
   create(@CurrentUser() user: User, @Body() body: Record<string, unknown>, @Req() req: Request) {
     if (!this.trips.can('trip_create', user.role, null, user.id, false)) {
       throw new HttpException({ error: 'No permission to create trips' }, 403);
     }
-    const { title, description, currency, reminder_days, day_count } = body as Record<string, never>;
+    const { title, description, origin_location, destination_location, currency, reminder_days, day_count } = body as Record<string, any>;
     if (!title) {
       throw new HttpException({ error: 'Title is required' }, 400);
     }
@@ -105,7 +224,7 @@ export class TripsController {
       throw new HttpException({ error: 'End date must be after start date' }, 400);
     }
     const parsedDayCount = day_count ? Math.min(Math.max(Number(day_count) || 7, 1), 365) : undefined;
-    const { trip, tripId, reminderDays } = this.trips.create(user.id, { title, description, start_date, end_date, currency, reminder_days, day_count: parsedDayCount });
+    const { trip, tripId, reminderDays } = this.trips.create(user.id, { title, description, origin_location, destination_location, start_date, end_date, currency, reminder_days, day_count: parsedDayCount });
     writeAudit({ userId: user.id, action: 'trip.create', ip: getClientIp(req), details: { tripId, title, reminder_days: reminderDays === 0 ? 'none' : `${reminderDays} days` } });
     if (reminderDays > 0) logInfo(`${user.email} set ${reminderDays}-day reminder for trip "${title}"`);
     return { trip };
@@ -134,7 +253,7 @@ export class TripsController {
     if (body.cover_image !== undefined && !this.trips.can('trip_cover_upload', user.role, ownerId, user.id, isMember)) {
       throw new HttpException({ error: 'No permission to change cover image' }, 403);
     }
-    const editFields = ['title', 'description', 'start_date', 'end_date', 'currency', 'reminder_days', 'day_count'];
+    const editFields = ['title', 'description', 'origin_location', 'destination_location', 'start_date', 'end_date', 'currency', 'reminder_days', 'day_count'];
     if (editFields.some((f) => body[f] !== undefined) && !this.trips.can('trip_edit', user.role, ownerId, user.id, isMember)) {
       throw new HttpException({ error: 'No permission to edit this trip' }, 403);
     }

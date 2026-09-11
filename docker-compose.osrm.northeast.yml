@@ -1,0 +1,11 @@
+services:
+  osrm-northeast:
+    image: osrm/osrm-backend:latest
+    container_name: trek_osrm_northeast
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+      - "5005:5000"
+    volumes:
+      - ./osrm-data:/data
+    command: osrm-routed --algorithm mld -t 1 /data/north-eastern-zone-260823.osrm

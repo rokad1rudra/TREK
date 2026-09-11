@@ -28,8 +28,60 @@ export async function calculateRoute(
     throw new Error('At least 2 waypoints required')
   }
 
+  // 1. Try backend proxy (/api/maps/route) first for self-hosted OSRM Docker
+  try {
+    const res = await fetch('/api/maps/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        waypoints: waypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
+        mode: profile,
+      }),
+      signal,
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data && Array.isArray(data.geometry) && data.geometry.length > 0) {
+        const coordinates: [number, number][] = data.geometry
+        const distance: number = data.distance
+        let duration: number = data.duration
+        if (profile === 'walking') {
+          duration = distance / (5000 / 3600)
+        } else if (profile === 'cycling') {
+          duration = distance / (15000 / 3600)
+        }
+
+        const walkingDuration = distance / (5000 / 3600)
+        const drivingDuration: number = data.duration
+
+        const alternatives = (data.alternatives || []).map((alt: any) => ({
+          coordinates: alt.geometry,
+          distance: alt.distance,
+          duration: alt.duration,
+          distanceText: formatRouteDistance(alt.distance),
+          durationText: formatDuration(alt.duration),
+          summary: alt.summary,
+        }))
+
+        return {
+          coordinates,
+          distance,
+          duration,
+          distanceText: formatRouteDistance(distance),
+          durationText: formatDuration(duration),
+          walkingText: formatDuration(walkingDuration),
+          drivingText: formatDuration(drivingDuration),
+          alternatives,
+        }
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') throw err
+  }
+
+  // 2. Direct public OSRM fallback
   const coords = waypoints.map((p) => `${p.lng},${p.lat}`).join(';')
-  const url = `${OSRM_BASE}/${profile}/${coords}?overview=full&geometries=geojson&steps=false`
+  const url = `${OSRM_BASE}/${profile}/${coords}?overview=full&geometries=geojson&steps=false&alternatives=true`
 
   const response = await fetch(url, { signal })
   if (!response.ok) {
@@ -58,6 +110,21 @@ export async function calculateRoute(
   const walkingDuration = distance / (5000 / 3600)
   const drivingDuration: number = route.duration
 
+  const alternatives = (data.routes.slice(1) || []).map((alt: any) => {
+    const altCoords: [number, number][] = alt.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng])
+    const altDist = alt.distance
+    let altDur = alt.duration
+    if (profile === 'walking') altDur = altDist / (5000 / 3600)
+    else if (profile === 'cycling') altDur = altDist / (15000 / 3600)
+    return {
+      coordinates: altCoords,
+      distance: altDist,
+      duration: altDur,
+      distanceText: formatRouteDistance(altDist),
+      durationText: formatDuration(altDur),
+    }
+  })
+
   return {
     coordinates,
     distance,
@@ -66,6 +133,7 @@ export async function calculateRoute(
     durationText: formatDuration(duration),
     walkingText: formatDuration(walkingDuration),
     drivingText: formatDuration(drivingDuration),
+    alternatives,
   }
 }
 
@@ -199,6 +267,40 @@ export async function calculateSegments(
 ): Promise<RouteSegment[]> {
   if (!waypoints || waypoints.length < 2) return []
 
+  // 1. Try backend proxy (/api/maps/route) first for self-hosted OSRM Docker
+  try {
+    const res = await fetch('/api/maps/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        waypoints: waypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
+        mode: 'driving',
+      }),
+      signal,
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data && Array.isArray(data.legs) && data.legs.length > 0) {
+        return data.legs.map((leg: { from: [number, number]; to: [number, number]; mid: [number, number]; distance: number; duration: number }): RouteSegment => {
+          const walkingDuration = leg.distance / (5000 / 3600)
+          return {
+            mid: leg.mid,
+            from: leg.from,
+            to: leg.to,
+            distance: leg.distance,
+            duration: leg.duration,
+            walkingText: formatDuration(walkingDuration),
+            drivingText: formatDuration(leg.duration),
+            distanceText: formatRouteDistance(leg.distance),
+          }
+        })
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') throw err
+  }
+
+  // 2. Direct public OSRM fallback
   const coords = waypoints.map((p) => `${p.lng},${p.lat}`).join(';')
   const url = `${OSRM_BASE}/driving/${coords}?overview=false&geometries=geojson&steps=false&annotations=distance,duration`
 
@@ -246,6 +348,51 @@ export async function calculateRouteWithLegs(
   const cached = routeCache.get(cacheKey)
   if (cached) return cached
 
+  // 1. Try backend proxy (/api/maps/route) first for self-hosted OSRM Docker
+  try {
+    const res = await fetch('/api/maps/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        waypoints: waypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
+        mode: profile,
+      }),
+      signal,
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data && Array.isArray(data.geometry) && data.geometry.length > 0) {
+        const coordinates: [number, number][] = data.geometry
+        const legs: RouteSegment[] = (data.legs || []).map(
+          (leg: { from: [number, number]; to: [number, number]; mid: [number, number]; distance: number; duration: number }): RouteSegment => {
+            const walkingDuration = leg.distance / (5000 / 3600)
+            return {
+              mid: leg.mid || [(leg.from[0] + leg.to[0]) / 2, (leg.from[1] + leg.to[1]) / 2],
+              from: leg.from,
+              to: leg.to,
+              distance: leg.distance,
+              duration: leg.duration,
+              walkingText: formatDuration(walkingDuration),
+              drivingText: formatDuration(leg.duration),
+              distanceText: formatRouteDistance(leg.distance),
+              durationText: formatDuration(leg.duration),
+            }
+          }
+        )
+        const result: RouteWithLegs = { coordinates, distance: data.distance, duration: data.duration, legs }
+        routeCache.set(cacheKey, result)
+        if (routeCache.size > ROUTE_CACHE_MAX) {
+          const oldest = routeCache.keys().next().value
+          if (oldest !== undefined) routeCache.delete(oldest)
+        }
+        return result
+      }
+    }
+  } catch (backendErr) {
+    if (backendErr instanceof Error && backendErr.name === 'AbortError') throw backendErr
+  }
+
+  // 2. Direct public OSRM fallback
   const url = `${OSRM_PROFILE_BASE[profile]}/${coords}?overview=full&geometries=geojson&annotations=distance,duration`
   const response = await fetch(url, { signal })
   if (!response.ok) throw new Error('Route could not be calculated')

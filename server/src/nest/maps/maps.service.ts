@@ -17,6 +17,9 @@ import {
   reverseGeocode,
   resolveGoogleMapsUrl,
   searchOverpassPois,
+  fetchOsrmRoute,
+  OsrmWaypoint,
+  OsrmRouteResult,
 } from '../../services/mapsService';
 import { serveFilePath } from '../../services/placePhotoCache';
 
@@ -91,5 +94,9 @@ export class MapsService {
   // OSM-only POI search by category within a viewport bbox (never calls Google).
   pois(category: string, bbox: { south: number; west: number; north: number; east: number }) {
     return searchOverpassPois(category, bbox);
+  }
+
+  route(waypoints: OsrmWaypoint[], mode?: 'driving' | 'walking' | 'bicycling' | 'cycling'): Promise<OsrmRouteResult> {
+    return fetchOsrmRoute(waypoints, mode);
   }
 }

@@ -4,9 +4,11 @@ import { decrypt_api_key } from './apiKeyCrypto';
 import { getAppUrl } from './notifications';
 // ── Photo cache (disk-backed) ────────────────────────────────────────────────
 import * as placePhotoCache from './placePhotoCache';
+import { PathfindingEngine, haversineDistanceMeters } from './pathfindingEngine';
 
 // ── Google API call counter ───────────────────────────────────────────────────
 
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
 let googleApiCallCount = 0;
 
 function googleFetch(endpoint: string, label: string, init?: RequestInit): Promise<Response> {
@@ -172,29 +174,70 @@ export async function searchNominatim(query: string, lang?: string) {
     limit: '10',
     'accept-language': toApiLang(lang),
   });
-  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-    headers: { 'User-Agent': UA },
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(
-      `Nominatim API error: ${response.status} ${response.statusText}${text ? ' - ' + text.substring(0, 200) : ''}`,
-    );
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      console.warn(`Nominatim API error: ${response.status} ${response.statusText}${text ? ' - ' + text.substring(0, 200) : ''}`);
+      throw new Error(`Nominatim error ${response.status}`);
+    }
+    const data = (await response.json()) as NominatimResult[];
+    return data.map((item) => ({
+      google_place_id: null,
+      google_ftid: null,
+      osm_id: `${item.osm_type}:${item.osm_id}`,
+      name: item.name || item.display_name?.split(',')[0] || '',
+      address: item.display_name || '',
+      lat: parseFloat(item.lat) || null,
+      lng: parseFloat(item.lon) || null,
+      rating: null,
+      website: null,
+      phone: null,
+      source: 'openstreetmap' as const,
+    }));
+  } catch (err) {
+    console.warn(`[Nominatim Search] Connection/timeout error:`, err);
+    // Fallback: Secondary public OpenStreetMap geocoder (Photon by Komoot)
+    try {
+      const photonParams = new URLSearchParams({
+        q: query,
+        limit: '10',
+        lang: toApiLang(lang),
+      });
+      const res = await fetch(`https://photon.komoot.io/api/?${photonParams}`, {
+        headers: { 'User-Agent': UA },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { features?: Array<{ properties?: any; geometry?: { coordinates: [number, number] } }> };
+        if (Array.isArray(body.features)) {
+          return body.features.map((feat) => {
+            const props = feat.properties || {};
+            const [lng, lat] = feat.geometry?.coordinates || [0, 0];
+            return {
+              google_place_id: null,
+              google_ftid: null,
+              osm_id: props.osm_type && props.osm_id ? `${props.osm_type}:${props.osm_id}` : `node:${Math.floor(Math.random() * 100000)}`,
+              name: props.name || props.street || query,
+              address: [props.name, props.street, props.city, props.country].filter(Boolean).join(', '),
+              lat: lat || null,
+              lng: lng || null,
+              rating: null,
+              website: null,
+              phone: null,
+              source: 'openstreetmap' as const,
+            };
+          });
+        }
+      }
+    } catch (photonErr) {
+      console.warn(`[Photon Fallback] Connection error:`, photonErr);
+    }
+    return [];
   }
-  const data = (await response.json()) as NominatimResult[];
-  return data.map((item) => ({
-    google_place_id: null,
-    google_ftid: null,
-    osm_id: `${item.osm_type}:${item.osm_id}`,
-    name: item.name || item.display_name?.split(',')[0] || '',
-    address: item.display_name || '',
-    lat: parseFloat(item.lat) || null,
-    lng: parseFloat(item.lon) || null,
-    rating: null,
-    website: null,
-    phone: null,
-    source: 'openstreetmap',
-  }));
 }
 
 // ── Nominatim lookup (by OSM ID) ────────────────────────────────────────────
@@ -1156,7 +1199,29 @@ export async function reverseGeocode(
   const data = (await response.json()) as { name?: string; display_name?: string; address?: Record<string, string> };
   const addr = data.address || {};
   const name = data.name || addr.tourism || addr.amenity || addr.shop || addr.building || addr.road || null;
-  return { name, address: data.display_name || null };
+
+  // Construct a clean, human-readable place string (e.g. "Varachha, Surat" or "Dhoraji, Gujarat")
+  const area = addr.neighbourhood || addr.suburb || addr.city_district || addr.quarter || addr.subdistrict;
+  const city = addr.city || addr.town || addr.village || addr.municipality || addr.county;
+  const state = addr.state;
+  const country = addr.country;
+
+  let cleanAddress: string | null = null;
+  if (area && city && area !== city) {
+    cleanAddress = `${area}, ${city}`;
+  } else if (city && state && city !== state) {
+    cleanAddress = `${city}, ${state}`;
+  } else if (city && country && city !== country) {
+    cleanAddress = `${city}, ${country}`;
+  } else if (city) {
+    cleanAddress = city;
+  } else if (state && country) {
+    cleanAddress = `${state}, ${country}`;
+  } else {
+    cleanAddress = data.display_name || null;
+  }
+
+  return { name: name || cleanAddress, address: cleanAddress || data.display_name || null };
 }
 
 // ── Resolve Google Maps URL ──────────────────────────────────────────────────
@@ -1249,4 +1314,361 @@ export async function resolveGoogleMapsUrl(
   const address = nominatim.display_name || null;
 
   return { lat, lng, name, address, google_ftid: googleFtidFromMapsUrl(resolvedUrl) };
+}
+
+// ── OpenRouteService (HeiGIT API) & OSRM Routing Engine ──────────────────────
+
+export interface OsrmWaypoint {
+  lat: number;
+  lng: number;
+}
+
+export interface OsrmRouteLeg {
+  from: [number, number];
+  to: [number, number];
+  mid: [number, number];
+  distance: number;
+  duration: number;
+}
+
+export interface OsrmAlternativeRoute {
+  geometry: [number, number][];
+  distance: number;
+  duration: number;
+  summary?: string;
+}
+
+export interface OsrmRouteResult {
+  geometry: [number, number][]; // [lat, lng] array for Leaflet
+  distance: number; // Meters
+  duration: number; // Seconds
+  legs?: OsrmRouteLeg[];
+  source: string;
+  alternatives?: OsrmAlternativeRoute[];
+}
+
+export async function fetchOrsRoute(
+  waypoints: OsrmWaypoint[],
+  mode: 'driving' | 'walking' | 'bicycling' | 'cycling' = 'driving',
+  apiKey: string,
+): Promise<OsrmRouteResult> {
+  if (!waypoints || waypoints.length < 2) {
+    throw Object.assign(new Error('At least 2 waypoints are required for routing'), { status: 400 });
+  }
+
+  const profileMap: Record<string, string> = {
+    driving: 'driving-car',
+    walking: 'foot-walking',
+    bicycling: 'cycling-regular',
+    cycling: 'cycling-regular',
+  };
+  const profile = profileMap[mode] || 'driving-car';
+  const url = `https://api.openrouteservice.org/v2/directions/${profile}/geojson`;
+
+  const coords = waypoints.map((w) => [w.lng, w.lat]);
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: apiKey,
+      'User-Agent': UA,
+    },
+    body: JSON.stringify({ coordinates: coords }),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`OpenRouteService API error: ${res.status} ${res.statusText}${text ? ' - ' + text.substring(0, 100) : ''}`);
+  }
+
+  const data = (await res.json()) as {
+    features?: Array<{
+      geometry?: {
+        coordinates: [number, number][]; // GeoJSON [lng, lat]
+      };
+      properties?: {
+        summary?: {
+          distance: number;
+          duration: number;
+        };
+        segments?: Array<{
+          distance: number;
+          duration: number;
+        }>;
+      };
+    }>;
+  };
+
+  const feature = data.features?.[0];
+  if (!feature || !feature.geometry?.coordinates) {
+    throw new Error('No route found from OpenRouteService');
+  }
+
+  // Convert GeoJSON [lng, lat] to Leaflet [lat, lng]
+  const leafletCoords: [number, number][] = feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+
+  const summary = feature.properties?.summary || { distance: 0, duration: 0 };
+  const rawSegments = feature.properties?.segments || [];
+
+  const legs: OsrmRouteLeg[] = rawSegments.map((seg, i) => {
+    const from: [number, number] = [waypoints[i].lat, waypoints[i].lng];
+    const to: [number, number] = [waypoints[i + 1] ? waypoints[i + 1].lat : waypoints[i].lat, waypoints[i + 1] ? waypoints[i + 1].lng : waypoints[i].lng];
+    const mid: [number, number] = [(from[0] + to[0]) / 2, (from[1] + to[1]) / 2];
+    return {
+      from,
+      to,
+      mid,
+      distance: Math.round(seg.distance),
+      duration: Math.round(seg.duration),
+    };
+  });
+
+  return {
+    geometry: leafletCoords,
+    distance: Math.round(summary.distance),
+    duration: Math.round(summary.duration),
+    legs,
+    source: 'openrouteservice',
+  };
+}
+
+export async function fetchOsrmRoute(
+  waypoints: OsrmWaypoint[],
+  mode: 'driving' | 'walking' | 'bicycling' | 'cycling' = 'driving',
+): Promise<OsrmRouteResult> {
+  if (!waypoints || waypoints.length < 2) {
+    throw Object.assign(new Error('At least 2 waypoints are required for routing'), { status: 400 });
+  }
+
+
+
+  const profileMap: Record<string, string> = {
+    driving: 'driving',
+    walking: 'foot',
+    bicycling: 'bike',
+    cycling: 'bike',
+  };
+  const profile = profileMap[mode] || 'driving';
+
+  const coordsStr = waypoints.map((w) => `${w.lng},${w.lat}`).join(';');
+
+  function decodePolyline(str: string, precision = 5): [number, number][] {
+    let index = 0;
+    let lat = 0;
+    let lng = 0;
+    const coordinates: [number, number][] = [];
+    const factor = Math.pow(10, precision);
+    while (index < str.length) {
+      let b;
+      let shift = 0;
+      let result = 0;
+      do {
+        b = str.charCodeAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      const dlat = result & 1 ? ~(result >> 1) : result >> 1;
+      lat += dlat;
+
+      shift = 0;
+      result = 0;
+      do {
+        b = str.charCodeAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      const dlng = result & 1 ? ~(result >> 1) : result >> 1;
+      lng += dlng;
+
+      coordinates.push([lat / factor, lng / factor]);
+    }
+    return coordinates;
+  }
+
+  // 1. Direct query on local self-hosted OSRM zone containers or custom OSRM_ROUTING_URL
+  let responseData: any = null;
+  let usedSource = 'public-osrm';
+
+  async function queryOsrmUrl(baseUrl: string, pts: OsrmWaypoint[]) {
+    try {
+      const cStr = pts.map((w) => `${w.lng},${w.lat}`).join(';');
+      const cleanBase = baseUrl.replace(/\/+$/, '');
+      const url = `${cleanBase}/route/v1/${profile}/${cStr}?overview=full&geometries=geojson&annotations=distance,duration&alternatives=true`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT, 'Bypass-Tunnel-Reminder': 'true' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        if (data.code === 'Ok' && Array.isArray(data.routes) && data.routes.length > 0 && data.routes[0].geometry) {
+          if (Array.isArray(data.waypoints)) {
+            const maxSnapDistMeters = 15000;
+            const valid = data.waypoints.every((wp: any) => typeof wp.distance === 'number' && wp.distance <= maxSnapDistMeters);
+            if (!valid) return null;
+          }
+          data.routes.sort((a: any, b: any) => a.distance - b.distance);
+          return data;
+        }
+      }
+    } catch { }
+    return null;
+  }
+
+  // Check explicit OSRM_ROUTING_URL / OSRM_URL first if configured in environment
+  const customOsrmUrl = (process.env.OSRM_ROUTING_URL || process.env.OSRM_URL)?.trim();
+  if (customOsrmUrl) {
+    const data = await queryOsrmUrl(customOsrmUrl, waypoints);
+    if (data) {
+      responseData = data;
+      usedSource = 'custom-osrm-url';
+    }
+  }
+
+  // Otherwise probe local self-hosted OSRM zone ports
+  if (!responseData) {
+    const localPorts = [5010, 5000, 5001, 5002, 5003, 5004, 5005];
+    for (const port of localPorts) {
+      const data = await queryOsrmUrl(`http://localhost:${port}`, waypoints);
+      if (data) {
+        responseData = data;
+        usedSource = port === 5010 ? 'self-hosted-osrm-india' : `self-hosted-osrm-port-${port}`;
+        break;
+      }
+    }
+  }
+
+  // 2. Fast Global Public OSRM via lightweight Polyline (transfers full road curves in seconds)
+  if (!responseData) {
+    const publicUrls = [
+      `https://router.project-osrm.org/route/v1/${profile}/${coordsStr}?overview=full&geometries=polyline`,
+      `https://routing.openstreetmap.de/routed-car/route/v1/driving/${coordsStr}?overview=full&geometries=polyline`,
+    ];
+    for (const fallbackUrl of publicUrls) {
+      try {
+        const res = await fetch(fallbackUrl, {
+          headers: { 'User-Agent': USER_AGENT },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.ok) {
+          const data: any = await res.json();
+          if (data.code === 'Ok' && Array.isArray(data.routes) && data.routes.length > 0 && data.routes[0].geometry) {
+            const geom = data.routes[0].geometry;
+            if (typeof geom === 'string') {
+              const decodedCoords = decodePolyline(geom);
+              data.routes[0].geometry = {
+                type: 'LineString',
+                coordinates: decodedCoords.map(([lat, lng]) => [lng, lat]),
+              };
+            }
+            responseData = data;
+            usedSource = 'public-osrm-fast';
+            break;
+          }
+        }
+      } catch {
+        // Try next fallback endpoint
+      }
+    }
+  }
+
+  // 3. OpenRouteService Fallback
+  const orsKey = (process.env.ORS_API_KEY || process.env.OPENROUTESERVICE_API_KEY)?.trim();
+  if (!responseData && orsKey) {
+    try {
+      return await fetchOrsRoute(waypoints, mode, orsKey);
+    } catch {
+      // Continue to fallback
+    }
+  }
+
+  if (!responseData || !responseData.routes || responseData.routes.length === 0 || !responseData.routes[0].geometry) {
+    console.warn(`[Routing] OSRM route calculation yielded no path between waypoints for mode '${mode}'. Using straight-line fallback.`);
+
+    let totalDist = 0;
+    const legs: OsrmRouteLeg[] = [];
+    const leafletCoords: [number, number][] = waypoints.map((w) => [w.lat, w.lng]);
+
+    for (let i = 0; i < waypoints.length - 1; i++) {
+      const fromWp = waypoints[i];
+      const toWp = waypoints[i + 1];
+      const legDist = haversineDistanceMeters(fromWp.lat, fromWp.lng, toWp.lat, toWp.lng);
+      totalDist += legDist;
+      let legDur = Math.round(legDist / 13.889);
+      if (mode === 'bicycling' || mode === 'cycling') legDur = Math.round(legDist / 5);
+      else if (mode === 'walking') legDur = Math.round(legDist / 1.333);
+
+      legs.push({
+        from: [fromWp.lat, fromWp.lng],
+        to: [toWp.lat, toWp.lng],
+        mid: [(fromWp.lat + toWp.lat) / 2, (fromWp.lng + toWp.lng) / 2],
+        distance: legDist,
+        duration: legDur,
+      });
+    }
+
+    return {
+      geometry: leafletCoords,
+      distance: totalDist,
+      duration: legs.reduce((acc, l) => acc + l.duration, 0),
+      legs,
+      source: 'straight-line-fallback',
+      alternatives: [],
+    };
+  }
+
+  const route = responseData.routes[0];
+  const leafletCoords: [number, number][] = route.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng]);
+
+  const legs: OsrmRouteLeg[] = (route.legs || []).map((leg: any, i: number) => {
+    const from: [number, number] = waypoints[i] ? [waypoints[i].lat, waypoints[i].lng] : [waypoints[0].lat, waypoints[0].lng];
+    const to: [number, number] = waypoints[i + 1] ? [waypoints[i + 1].lat, waypoints[i + 1].lng] : [waypoints[waypoints.length - 1].lat, waypoints[waypoints.length - 1].lng];
+    const mid: [number, number] = [(from[0] + to[0]) / 2, (from[1] + to[1]) / 2];
+    return {
+      from,
+      to,
+      mid,
+      distance: Math.round(leg.distance || 0),
+      duration: Math.round(leg.duration || 0),
+    };
+  });
+
+  let finalDuration = Math.round(route.duration);
+  const distMeters = Math.round(route.distance);
+  if (mode === 'bicycling' || mode === 'cycling') {
+    // Average cycling speed: ~18 km/h = 5 m/s
+    finalDuration = Math.max(finalDuration, Math.round(distMeters / 5));
+  } else if (mode === 'walking') {
+    // Average human walking speed: ~4.8 km/h = 1.333 m/s
+    finalDuration = Math.max(finalDuration, Math.round(distMeters / 1.333));
+  }
+
+  const alternatives: OsrmAlternativeRoute[] = (responseData.routes?.slice(1) || [])
+    .filter((alt: any) => alt && alt.geometry && Array.isArray(alt.geometry.coordinates))
+    .map((alt: any) => {
+      const altCoords: [number, number][] = alt.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng]);
+      let altDuration = Math.round(alt.duration || 0);
+      const altDist = Math.round(alt.distance || 0);
+      if (mode === 'bicycling' || mode === 'cycling') {
+        altDuration = Math.max(altDuration, Math.round(altDist / 5));
+      } else if (mode === 'walking') {
+        altDuration = Math.max(altDuration, Math.round(altDist / 1.333));
+      }
+      return {
+        geometry: altCoords,
+        distance: altDist,
+        duration: altDuration,
+        summary: alt.summary || undefined,
+      };
+    });
+
+  return {
+    geometry: leafletCoords,
+    distance: distMeters,
+    duration: finalDuration,
+    legs,
+    source: usedSource,
+    alternatives,
+  };
 }

@@ -1031,7 +1031,7 @@ function runMigrations(db: Database.Database): void {
     () => {
       const columns = db.prepare("PRAGMA table_info('trip_photos')").all() as Array<{ name: string }>;
       const names = new Set(columns.map((c) => c.name));
-      if (names.has('asset_id') && !names.has('immich_asset_id')) return;
+      if (!names.has('immich_asset_id')) return;
       db.exec('ALTER TABLE `trip_photos` RENAME COLUMN immich_asset_id TO asset_id');
       db.exec('ALTER TABLE `trip_photos` ADD COLUMN provider TEXT NOT NULL DEFAULT "immich"');
       db.exec('ALTER TABLE `trip_album_links` ADD COLUMN provider TEXT NOT NULL DEFAULT "immich"');
@@ -1335,17 +1335,22 @@ function runMigrations(db: Database.Database): void {
     },
     // Migration: Refresh-token rotation chain tracking for replay detection
     () => {
-      db.exec(`
-        ALTER TABLE oauth_tokens ADD COLUMN parent_token_id INTEGER REFERENCES oauth_tokens(id);
-        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_parent ON oauth_tokens(parent_token_id);
-      `);
+      const columns = db.prepare("PRAGMA table_info('oauth_tokens')").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'parent_token_id')) {
+        db.exec('ALTER TABLE oauth_tokens ADD COLUMN parent_token_id INTEGER REFERENCES oauth_tokens(id)');
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS idx_oauth_tokens_parent ON oauth_tokens(parent_token_id)');
     },
     // Migration: Public client support for browser-initiated dynamic registration (DCR)
     () => {
-      db.exec(`
-        ALTER TABLE oauth_clients ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE oauth_clients ADD COLUMN created_via TEXT NOT NULL DEFAULT 'settings_ui';
-      `);
+      const columns = db.prepare("PRAGMA table_info('oauth_clients')").all() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+      if (!names.has('is_public')) {
+        db.exec('ALTER TABLE oauth_clients ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0');
+      }
+      if (!names.has('created_via')) {
+        db.exec("ALTER TABLE oauth_clients ADD COLUMN created_via TEXT NOT NULL DEFAULT 'settings_ui'");
+      }
     },
     // Migration: Make oauth_clients.user_id nullable to support anonymous RFC 7591 DCR clients
     // (must run outside a transaction because PRAGMA foreign_keys cannot change mid-transaction)
@@ -1393,8 +1398,14 @@ function runMigrations(db: Database.Database): void {
         VALUES
           ('synologyphotos', 'synology_otp', 'providerOTP', 'text', '123456', 0, 0, NULL, 'synology_otp', 3)
       `);
-      db.exec(`ALTER TABLE users ADD COLUMN synology_skip_ssl INTEGER NOT NULL DEFAULT 0`);
-      db.exec(`ALTER TABLE users ADD COLUMN synology_did TEXT`);
+      const userCols = db.prepare("PRAGMA table_info('users')").all() as Array<{ name: string }>;
+      const userNames = new Set(userCols.map((c) => c.name));
+      if (!userNames.has('synology_skip_ssl')) {
+        db.exec('ALTER TABLE users ADD COLUMN synology_skip_ssl INTEGER NOT NULL DEFAULT 0');
+      }
+      if (!userNames.has('synology_did')) {
+        db.exec('ALTER TABLE users ADD COLUMN synology_did TEXT');
+      }
       db.exec(`
         INSERT OR IGNORE INTO photo_provider_fields
           (provider_id, field_key, label, input_type, placeholder, required, secret, settings_key, payload_key, sort_order)
@@ -1508,6 +1519,22 @@ function runMigrations(db: Database.Database): void {
           source TEXT NOT NULL DEFAULT 'dawarich'
         )
       `);
+
+      const journeyColumns = db.prepare("PRAGMA table_info('journeys')").all() as Array<{ name: string }>;
+      if (!journeyColumns.some((column) => column.name === 'trip_id')) {
+        db.exec('ALTER TABLE journeys ADD COLUMN trip_id INTEGER REFERENCES trips(id) ON DELETE SET NULL');
+      }
+      if (!journeyColumns.some((column) => column.name === 'public_token')) {
+        db.exec('ALTER TABLE journeys ADD COLUMN public_token TEXT');
+      }
+      const journeyPhotoColumns = db.prepare("PRAGMA table_info('journey_photos')").all() as Array<{ name: string }>;
+      const journeyPhotoNames = new Set(journeyPhotoColumns.map((column) => column.name));
+      if (!journeyPhotoNames.has('checkin_id')) {
+        db.exec('ALTER TABLE journey_photos ADD COLUMN checkin_id TEXT REFERENCES journey_checkins(id) ON DELETE SET NULL');
+      }
+      if (!journeyPhotoNames.has('entry_id')) {
+        db.exec('ALTER TABLE journey_photos ADD COLUMN entry_id TEXT REFERENCES journey_entries(id) ON DELETE SET NULL');
+      }
 
       // Indexes
       db.exec(`
@@ -1626,7 +1653,9 @@ function runMigrations(db: Database.Database): void {
       }
     },
     // Migration 87: Journey rebuild — new schema with trip sync
-    () => {
+    {
+      raw: () => {
+      db.exec('PRAGMA foreign_keys = OFF');
       // Migrate existing data from old tables into backup, then rebuild
       const hasOldJourneys = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='journeys'").get();
 
@@ -1653,13 +1682,18 @@ function runMigrations(db: Database.Database): void {
         }
 
         // Drop all old journey tables
-        db.exec('DROP TABLE IF EXISTS journey_location_trail');
-        db.exec('DROP TABLE IF EXISTS journey_photos');
-        db.exec('DROP TABLE IF EXISTS journey_entries');
-        db.exec('DROP TABLE IF EXISTS journey_checkins');
-        db.exec('DROP TABLE IF EXISTS journey_members');
-        db.exec('DROP TABLE IF EXISTS journey_trips');
-        db.exec('DROP TABLE IF EXISTS journeys');
+        try {
+          db.exec('DROP TABLE IF EXISTS journey_checkins');
+          db.exec('DROP TABLE IF EXISTS journey_entries');
+          db.exec('DROP TABLE IF EXISTS journey_location_trail');
+          db.exec('DROP TABLE IF EXISTS journey_members');
+          db.exec('DROP TABLE IF EXISTS journey_trips');
+          db.exec('DROP TABLE IF EXISTS journey_photos');
+          db.exec('DROP TABLE IF EXISTS journey_contributors');
+          db.exec('DROP TABLE IF EXISTS journeys');
+        } catch (err) {
+          console.warn('[migrations] Non-fatal legacy journey table cleanup failed:', err);
+        }
       }
 
       // New schema
@@ -1718,7 +1752,7 @@ function runMigrations(db: Database.Database): void {
       `);
 
       db.exec(`
-        CREATE TABLE journey_photos (
+        CREATE TABLE IF NOT EXISTS journey_photos (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           entry_id INTEGER NOT NULL,
           file_path TEXT NOT NULL,
@@ -1744,15 +1778,36 @@ function runMigrations(db: Database.Database): void {
         )
       `);
 
+      const journeyPhotosTable = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journey_photos'")
+        .get();
+      if (!journeyPhotosTable) {
+        db.exec(`
+          CREATE TABLE journey_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL,
+            file_path TEXT,
+            thumbnail_path TEXT,
+            caption TEXT,
+            sort_order INTEGER DEFAULT 0,
+            width INTEGER,
+            height INTEGER,
+            created_at INTEGER NOT NULL
+          )
+        `);
+      }
+
       // Indexes
       db.exec(`
         CREATE INDEX idx_journeys_user ON journeys(user_id);
         CREATE INDEX idx_journey_entries_journey ON journey_entries(journey_id, entry_date);
         CREATE INDEX idx_journey_entries_source ON journey_entries(source_place_id);
-        CREATE INDEX idx_journey_photos_entry ON journey_photos(entry_id);
         CREATE INDEX idx_journey_trips_journey ON journey_trips(journey_id);
         CREATE INDEX idx_journey_contributors_user ON journey_contributors(user_id);
       `);
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journey_photos'").get()) {
+        db.exec('CREATE INDEX IF NOT EXISTS idx_journey_photos_entry ON journey_photos(entry_id)');
+      }
 
       // Re-import old data if it existed
       if (oldJourneys.length > 0) {
@@ -1858,6 +1913,8 @@ function runMigrations(db: Database.Database): void {
           `[DB] Journey migration: imported ${journeyIdMap.size} journeys, ${entryIdMap.size} entries, photos migrated`,
         );
       }
+      db.exec('PRAGMA foreign_keys = ON');
+      },
     },
     // Migration 88: Journey photos — provider support (Immich/Synology)
     () => {
@@ -2146,8 +2203,14 @@ function runMigrations(db: Database.Database): void {
     },
     // Migration 103: System notices — user tracking columns + dismissals table
     () => {
-      db.exec(`ALTER TABLE users ADD COLUMN first_seen_version TEXT NOT NULL DEFAULT '0.0.0'`);
-      db.exec(`ALTER TABLE users ADD COLUMN login_count INTEGER NOT NULL DEFAULT 0`);
+      const userColumns = db.prepare("PRAGMA table_info('users')").all() as Array<{ name: string }>;
+      const userNames = new Set(userColumns.map((column) => column.name));
+      if (!userNames.has('first_seen_version')) {
+        db.exec("ALTER TABLE users ADD COLUMN first_seen_version TEXT NOT NULL DEFAULT '0.0.0'");
+      }
+      if (!userNames.has('login_count')) {
+        db.exec('ALTER TABLE users ADD COLUMN login_count INTEGER NOT NULL DEFAULT 0');
+      }
       db.exec(`
         CREATE TABLE IF NOT EXISTS user_notice_dismissals (
           user_id      INTEGER NOT NULL,
@@ -2565,7 +2628,16 @@ function runMigrations(db: Database.Database): void {
         )
       `);
 
-      if (hasOld || hasBackup) {
+      let hasLegacyPhotos = false;
+      try {
+        const legacyPhotoCount = db.prepare('SELECT COUNT(*) AS count FROM journey_photos_old').get() as
+          | { count: number }
+          | undefined;
+        hasLegacyPhotos = (legacyPhotoCount?.count ?? 0) > 0;
+      } catch {
+        // Legacy metadata can outlive the table after an interrupted rebuild.
+      }
+      if (hasLegacyPhotos) {
         // Backfill gallery: deduplicate by (journey_id, photo_id), keeping
         // the earliest row (MIN(id) = earliest created_at on AUTOINCREMENT).
         db.exec(`
@@ -2605,7 +2677,7 @@ function runMigrations(db: Database.Database): void {
            AND jp.photo_id   = jpo.photo_id
         `);
 
-        db.exec('DROP TABLE journey_photos_old');
+        db.exec('DROP TABLE IF EXISTS journey_photos_old');
       }
 
       // Remove synthetic wrapper entries replaced by the gallery model.
@@ -2719,8 +2791,8 @@ function runMigrations(db: Database.Database): void {
       db.exec(
         `CREATE TABLE IF NOT EXISTS migrations (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, timestamp bigint NOT NULL, name varchar NOT NULL);`,
       );
-      db.exec(`INSERT INTO migrations (timestamp, name) VALUES (1777810195344, 'InitialSchema1777810195344');`);
-      db.exec(`INSERT INTO app_settings (key, value) VALUES ('app_version', '${process.env.APP_VERSION || '3.0.14'}')`);
+      db.exec(`INSERT OR IGNORE INTO migrations (timestamp, name) VALUES (1777810195344, 'InitialSchema1777810195344');`);
+      db.exec(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('app_version', '${process.env.APP_VERSION || '3.0.14'}')`);
     },
     // trim leading/trailing whitespace from stored usernames and emails
     () => {

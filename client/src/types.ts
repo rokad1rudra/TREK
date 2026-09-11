@@ -167,6 +167,15 @@ export interface RouteWithLegs {
   legs: RouteSegment[]
 }
 
+export interface AlternativeRoute {
+  coordinates: [number, number][]
+  distance: number
+  duration: number
+  distanceText: string
+  durationText: string
+  summary?: string
+}
+
 export interface RouteResult {
   coordinates: [number, number][]
   distance: number
@@ -175,6 +184,7 @@ export interface RouteResult {
   durationText: string
   walkingText: string
   drivingText: string
+  alternatives?: AlternativeRoute[]
 }
 
 export interface Waypoint {

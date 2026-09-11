@@ -31,7 +31,7 @@ const AVG_TILE_KB = 15
 export const MAX_TILES = Math.floor((180 * 1024) / AVG_TILE_KB) // = 12288
 
 const DEFAULT_TILE_URL =
-  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 
 const SUBDOMAINS = ['a', 'b', 'c', 'd']
 let _subIdx = 0

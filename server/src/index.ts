@@ -83,6 +83,12 @@ const onListen = () => {
   scheduler.startAirTrailSync();
   const { startTokenCleanup } = require('./services/ephemeralTokens');
   startTokenCleanup();
+  import('./db/mongoService').then(({ getMongoDb }) => {
+    getMongoDb().catch(() => {});
+  });
+  import('./db/supabaseService').then(({ initSupabase }) => {
+    initSupabase().catch(() => {});
+  });
   import('./websocket').then(({ setupWebSocket }) => {
     setupWebSocket(server);
   });
@@ -99,8 +105,38 @@ async function bootstrap(): Promise<void> {
   // order; it is shared with the integration-test harness so they can't drift.
   nestApp = await buildApp();
   server = http.createServer(nestApp.getHttpAdapter().getInstance());
-  if (HOST) server.listen(PORT, HOST, onListen);
-  else server.listen(PORT, onListen);
+  let bindRetryCount = 0;
+  server.on('error', (err: { code?: string }) => {
+    if (err.code === 'EADDRINUSE' && bindRetryCount < 5) {
+      bindRetryCount++;
+      console.warn(`[server] Port ${PORT} occupied by stale process — clearing port and retrying (attempt ${bindRetryCount}/5)...`);
+      try {
+        if (process.platform === 'win32') {
+          require('node:child_process').execSync(
+            `for /f "tokens=5" %a in ('netstat -aon ^| findstr :${PORT}') do taskkill /f /pid %a`,
+            { stdio: 'ignore' }
+          );
+        }
+      } catch { /* ignore */ }
+      setTimeout(() => {
+        const listenCb = () => {
+          bindRetryCount = 0;
+          onListen();
+        };
+        if (HOST) server.listen(PORT, HOST, listenCb);
+        else server.listen(PORT, listenCb);
+      }, 800);
+    } else {
+      console.error('Fatal: server error', err);
+      process.exit(1);
+    }
+  });
+  const handleInitialListen = () => {
+    bindRetryCount = 0;
+    onListen();
+  };
+  if (HOST) server.listen(PORT, HOST, handleInitialListen);
+  else server.listen(PORT, handleInitialListen);
 }
 
 bootstrap().catch((err) => {
@@ -116,6 +152,7 @@ function shutdown(signal: string): void {
   scheduler.stop();
   closeMcpSessions();
   void nestApp?.close();
+  try { server?.closeAllConnections?.(); } catch { /* ignore */ }
   server.close(() => {
     sLogInfo('HTTP server closed');
     const { closeDb } = require('./db/database');

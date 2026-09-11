@@ -23,6 +23,7 @@ const socketId = new WeakMap<NomadWebSocket, number>();
 let nextSocketId = 1;
 
 let wss: WebSocketServer | null = null;
+let currentUpgradeHandler: ((req: http.IncomingMessage, socket: any, head: Buffer) => void) | null = null;
 
 // Per-connection message rate limiting
 const WS_MSG_LIMIT = 30;        // max messages
@@ -31,13 +32,26 @@ const socketMsgCounts = new WeakMap<NomadWebSocket, { count: number; windowStart
 
 /** Attaches a WebSocket server with JWT auth, room-based trip channels, and heartbeat keep-alive. */
 function setupWebSocket(server: http.Server): void {
+  if (wss) {
+    try {
+      wss.close();
+    } catch {
+      /* ignore */
+    }
+    wss = null;
+  }
+
+  if (currentUpgradeHandler) {
+    server.removeListener('upgrade', currentUpgradeHandler);
+    currentUpgradeHandler = null;
+  }
+
   const allowedOrigins = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : null;
 
   wss = new WebSocketServer({
-    server,
-    path: '/ws',
+    noServer: true,
     maxPayload: 64 * 1024, // 64 KB max message size
     verifyClient: allowedOrigins
       ? ({ origin }, cb) => {
@@ -46,6 +60,17 @@ function setupWebSocket(server: http.Server): void {
         }
       : undefined,
   });
+
+  currentUpgradeHandler = (req: http.IncomingMessage, socket: any, head: Buffer) => {
+    const url = new URL(req.url || '', 'http://localhost');
+    if (url.pathname === '/ws') {
+      wss?.handleUpgrade(req, socket, head, (ws) => {
+        wss?.emit('connection', ws, req);
+      });
+    }
+  };
+
+  server.on('upgrade', currentUpgradeHandler);
 
   const HEARTBEAT_INTERVAL = 30000; // 30 seconds
   const heartbeat = setInterval(() => {

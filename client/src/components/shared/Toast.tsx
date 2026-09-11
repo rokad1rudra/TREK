@@ -165,4 +165,27 @@ export const useToast = () => {
   }
 }
 
+export const toast = {
+  success: (message: string, duration?: number) => {
+    if (typeof window !== 'undefined' && typeof window.__addToast === 'function') {
+      window.__addToast(message, 'success', duration)
+    }
+  },
+  error: (message: string, duration?: number) => {
+    if (typeof window !== 'undefined' && typeof window.__addToast === 'function') {
+      window.__addToast(message, 'error', duration)
+    }
+  },
+  warning: (message: string, duration?: number) => {
+    if (typeof window !== 'undefined' && typeof window.__addToast === 'function') {
+      window.__addToast(message, 'warning', duration)
+    }
+  },
+  info: (message: string, duration?: number) => {
+    if (typeof window !== 'undefined' && typeof window.__addToast === 'function') {
+      window.__addToast(message, 'info', duration)
+    }
+  },
+}
+
 export default useToast

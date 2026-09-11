@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo, useCallback, createElement, memo } from 'react'
+import { useEffect, useRef, useState, useMemo, useCallback, createElement, memo, Fragment } from 'react'
 import DOM from 'react-dom'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Circle, useMap, Tooltip } from 'react-leaflet'
@@ -336,6 +336,7 @@ function MapContextMenuHandler({ onContextMenu }: { onContextMenu: ((e: L.Leafle
 // Module-level photo cache shared with PlaceAvatar
 import { getCached, isLoading, fetchPhoto, onThumbReady, getAllThumbs } from '../../services/photoService'
 import { useAuthStore } from '../../store/authStore'
+import { useTripStore } from '../../store/tripStore'
 import { useGeolocation } from '../../hooks/useGeolocation'
 import LocationButton from './LocationButton'
 
@@ -439,9 +440,64 @@ const MemoMarker = memo(function MemoMarker({
   )
 })
 
+const startPinIcon = new L.DivIcon({
+  className: 'start-map-pin',
+  html: `
+    <div style="position:relative;width:34px;height:34px;display:flex;align-items:center;justify-content:center;transform:translate(-50%,-100%);">
+      <div style="width:34px;height:34px;background:#10b981;border:3px solid white;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 4px 14px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;">
+        <div style="width:12px;height:12px;background:white;border-radius:50%;"></div>
+      </div>
+    </div>
+  `,
+  iconSize: [34, 34],
+  iconAnchor: [17, 34],
+})
+
+const destPinIcon = new L.DivIcon({
+  className: 'dest-map-pin',
+  html: `
+    <div style="position:relative;width:34px;height:34px;display:flex;align-items:center;justify-content:center;transform:translate(-50%,-100%);">
+      <div style="width:34px;height:34px;background:#ef4444;border:3px solid white;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 4px 14px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;">
+        <div style="width:12px;height:12px;background:white;border-radius:50%;"></div>
+      </div>
+    </div>
+  `,
+  iconSize: [34, 34],
+  iconAnchor: [17, 34],
+})
+
+function TripRouteController({ route, hasPlaces }: { route: { origin?: { lat: number; lng: number }; destination?: { lat: number; lng: number } } | null; hasPlaces: boolean }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!route || hasPlaces) return
+    const points: [number, number][] = []
+    if (route.origin && Number.isFinite(route.origin.lat) && Number.isFinite(route.origin.lng)) {
+      points.push([route.origin.lat, route.origin.lng])
+    }
+    if (route.destination && Number.isFinite(route.destination.lat) && Number.isFinite(route.destination.lng)) {
+      points.push([route.destination.lat, route.destination.lng])
+    }
+    if (points.length === 2) {
+      try {
+        const bounds = L.latLngBounds(points)
+        if (bounds.isValid()) {
+          map.fitBounds(bounds, { padding: [80, 80], maxZoom: 13, animate: true })
+        }
+      } catch {}
+    } else if (points.length === 1) {
+      try {
+        map.setView(points[0], 10, { animate: true })
+      } catch {}
+    }
+  }, [route, hasPlaces, map])
+  return null
+}
+
 export const MapView = memo(function MapView({
   places = [],
   dayPlaces = [],
+  originLocation,
+  destinationLocation,
   route = null,
   routeSegments = [],
   selectedPlaceId = null,
@@ -451,7 +507,7 @@ export const MapView = memo(function MapView({
   onMapContextMenu = null,
   center = DEFAULT_MAP_CENTER,
   zoom = DEFAULT_MAP_ZOOM,
-  tileUrl = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+  tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
   fitKey = 0,
   dayOrderMap = {},
   leftWidth = 0,
@@ -468,6 +524,176 @@ export const MapView = memo(function MapView({
   onViewportChange,
   tripId,
 }: any) {
+  const currentTrip = useTripStore(s => s.trip)
+  const { position: userPosition, mode: trackingMode, error: trackingError, cycleMode: cycleTrackingMode } = useGeolocation()
+
+  type LocationPoint = { lat: number; lng: number; title: string }
+  const [tripRoute, setTripRoute] = useState<{ origin?: LocationPoint; destination?: LocationPoint } | null>(null)
+
+  const origName = originLocation || currentTrip?.origin_location
+  let destName = destinationLocation || currentTrip?.destination_location
+  if (!destName && currentTrip?.title) {
+    const match = currentTrip.title.match(/Trip to (.+)/i)
+    if (match) {
+      destName = match[1].trim()
+    } else {
+      destName = currentTrip.title.trim()
+    }
+  }
+
+  useEffect(() => {
+    if (!origName && !destName && !userPosition) {
+      setTripRoute(null)
+      return
+    }
+
+    let isMounted = true
+    const fetchRoute = async () => {
+      let origPoint: LocationPoint | undefined
+      let destPoint: LocationPoint | undefined
+
+      if (origName) {
+        try {
+          const res = await mapsApi.search(origName, 'en')
+          if (res?.places?.[0] && res.places[0].lat != null && res.places[0].lng != null) {
+            origPoint = { lat: Number(res.places[0].lat), lng: Number(res.places[0].lng), title: origName }
+          }
+        } catch {}
+      }
+
+      if (!origPoint && userPosition && Number.isFinite(userPosition.lat) && Number.isFinite(userPosition.lng)) {
+        origPoint = { lat: userPosition.lat, lng: userPosition.lng, title: 'Current Location' }
+      }
+
+      if (!origPoint) {
+        origPoint = { lat: 21.1702, lng: 72.8311, title: 'Surat' }
+      }
+
+      if (destName) {
+        try {
+          const res = await mapsApi.search(destName, 'en')
+          if (res?.places?.[0] && res.places[0].lat != null && res.places[0].lng != null) {
+            destPoint = { lat: Number(res.places[0].lat), lng: Number(res.places[0].lng), title: destName }
+          }
+        } catch {}
+      }
+
+      if (isMounted) {
+        if (origPoint || destPoint) {
+          setTripRoute({ origin: origPoint, destination: destPoint })
+        } else {
+          setTripRoute(null)
+        }
+      }
+    }
+
+    fetchRoute()
+
+    if (!origName && !userPosition && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (isMounted) {
+            const lat = pos.coords.latitude
+            const lng = pos.coords.longitude
+            setTripRoute(prev => ({
+              origin: { lat, lng, title: 'Current Location' },
+              destination: prev?.destination
+            }))
+          }
+        },
+        () => {},
+        { timeout: 5000 }
+      )
+    }
+
+    return () => { isMounted = false }
+  }, [origName, destName, userPosition?.lat, userPosition?.lng])
+
+  interface RoadPathOption {
+    id: number
+    name: string
+    geometry: [number, number][]
+    distanceKm: number
+    durationText: string
+    summary?: string
+  }
+
+  const [allRoadPaths, setAllRoadPaths] = useState<RoadPathOption[]>([])
+  const [selectedRouteIdx, setSelectedRouteIdx] = useState<number>(0)
+  const [osrmRoadPath, setOsrmRoadPath] = useState<RoadPathOption | null>(null)
+  const [isRouteLoading, setIsRouteLoading] = useState<boolean>(false)
+  const [travelMode, setTravelMode] = useState<'driving' | 'bicycling' | 'walking'>('driving')
+
+  const handleSelectRoute = useCallback((idx: number) => {
+    if (allRoadPaths[idx]) {
+      setSelectedRouteIdx(idx)
+      setOsrmRoadPath(allRoadPaths[idx])
+    }
+  }, [allRoadPaths])
+
+  useEffect(() => {
+    if (tripRoute?.origin && tripRoute?.destination) {
+      let isMounted = true
+      setIsRouteLoading(true)
+      mapsApi.route([
+        { lat: tripRoute.origin.lat, lng: tripRoute.origin.lng },
+        { lat: tripRoute.destination.lat, lng: tripRoute.destination.lng },
+      ], travelMode).then((res) => {
+        if (isMounted) {
+          setIsRouteLoading(false)
+          if (res?.geometry && res.geometry.length > 0) {
+            const formatDur = (sec: number) => {
+              let adjustedSec = sec
+              if (travelMode === 'bicycling') {
+                adjustedSec = Math.max(sec, Math.round(res.distance / 5))
+              } else if (travelMode === 'walking') {
+                adjustedSec = Math.max(sec, Math.round(res.distance / 1.333))
+              }
+              const days = Math.floor(adjustedSec / 86400)
+              const hrs = Math.floor((adjustedSec % 86400) / 3600)
+              const mins = Math.round((adjustedSec % 3600) / 60)
+              if (days >= 1) return hrs > 0 ? `${days}d ${hrs}h` : `${days} days`
+              if (hrs >= 1) return `${hrs}h ${mins}m`
+              return `${mins} min`
+            }
+
+            const mainPath: RoadPathOption = {
+              id: 0,
+              name: 'Route 1 (Main)',
+              geometry: res.geometry,
+              distanceKm: Math.round(res.distance / 100) / 10,
+              durationText: formatDur(res.duration),
+            }
+
+            const altPaths: RoadPathOption[] = (res.alternatives || []).map((alt: any, idx: number) => ({
+              id: idx + 1,
+              name: `Route ${idx + 2}`,
+              geometry: alt.geometry,
+              distanceKm: Math.round(alt.distance / 100) / 10,
+              durationText: formatDur(alt.duration),
+              summary: alt.summary,
+            }))
+
+            const paths = [mainPath, ...altPaths]
+            setAllRoadPaths(paths)
+            setSelectedRouteIdx(0)
+            setOsrmRoadPath(mainPath)
+          }
+        }
+      }).catch(() => {
+        if (isMounted) {
+          setIsRouteLoading(false)
+          setAllRoadPaths([])
+          setOsrmRoadPath(null)
+        }
+      })
+      return () => { isMounted = false }
+    } else {
+      setIsRouteLoading(false)
+      setAllRoadPaths([])
+      setOsrmRoadPath(null)
+    }
+  }, [tripRoute?.origin?.lat, tripRoute?.origin?.lng, tripRoute?.destination?.lat, tripRoute?.destination?.lng, travelMode])
   const poiMarkers = useMemo(() => (pois as Poi[]).map((poi: Poi) => (
     <Marker
       key={`poi-${poi.osm_id}`}
@@ -672,7 +898,6 @@ export const MapView = memo(function MapView({
   const TooltipOverlay = !hoverDisabled && hoveredPlace && tooltipPos && !isTouchDevice
   const CatIcon = TooltipOverlay ? getCategoryIcon(hoveredPlace.category_icon) : null
 
-  const { position: userPosition, mode: trackingMode, error: trackingError, cycleMode: cycleTrackingMode } = useGeolocation()
   // Desktop browsers only get IP-based geolocation (city-level accuracy),
   // so the button would be misleading. Mobile, where real GPS lives, keeps it.
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
@@ -682,6 +907,35 @@ export const MapView = memo(function MapView({
   const locationButtonBottom = hasDayDetail
     ? 'calc(var(--bottom-nav-h, 84px) + 20px + var(--day-panel-h, 0px) + 12px)'
     : 'calc(var(--bottom-nav-h, 84px) + 12px)'
+
+  const startPinMarkerIcon = useMemo(() => {
+    const modeEmoji = travelMode === 'driving' ? '🚗' : travelMode === 'bicycling' ? '🚲' : '🚶'
+    return L.divIcon({
+      html: `
+        <div style="position:relative;display:flex;align-items:center;justify-content:center;width:40px;height:40px;background:linear-gradient(135deg, #10b981 0%, #059669 100%);border:2.5px solid #ffffff;border-radius:50%;box-shadow:0 4px 14px rgba(16,185,129,0.5);font-size:20px;color:#fff;">
+          <span>${modeEmoji}</span>
+          <div style="position:absolute;bottom:-7px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-top:8px solid #059669;"></div>
+        </div>
+      `,
+      className: 'mode-start-pin-wrapper',
+      iconSize: [40, 47],
+      iconAnchor: [20, 47],
+    })
+  }, [travelMode])
+
+  const destPinMarkerIcon = useMemo(() => {
+    return L.divIcon({
+      html: `
+        <div style="position:relative;display:flex;align-items:center;justify-content:center;width:40px;height:40px;background:linear-gradient(135deg, #ef4444 0%, #dc2626 100%);border:2.5px solid #ffffff;border-radius:50%;box-shadow:0 4px 14px rgba(239,68,68,0.5);font-size:20px;color:#fff;">
+          <span>📍</span>
+          <div style="position:absolute;bottom:-7px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-top:8px solid #dc2626;"></div>
+        </div>
+      `,
+      className: 'mode-dest-pin-wrapper',
+      iconSize: [40, 47],
+      iconAnchor: [20, 47],
+    })
+  }, [])
 
   return (
     <>
@@ -694,16 +948,24 @@ export const MapView = memo(function MapView({
       className="w-full h-full bg-[#e5e7eb]"
     >
       <TileLayer
-        url={tileUrl}
+        url={
+          (tileUrl && !tileUrl.includes('cartocdn.com'))
+            ? tileUrl
+            : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+        }
+        subdomains={['a', 'b', 'c']}
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         maxZoom={19}
-        keepBuffer={8}
+        maxNativeZoom={19}
+        keepBuffer={24}
         updateWhenZooming={false}
-        updateWhenIdle={true}
-        referrerPolicy="strict-origin-when-cross-origin"
+        updateWhenIdle={false}
+        updateInterval={30}
+        crossOrigin="anonymous"
+        referrerPolicy="no-referrer-when-downgrade"
       />
 
-      <MapController center={center} zoom={zoom} />
+      <TripRouteController route={tripRoute} hasPlaces={places.length > 0} />
       <BoundsController places={dayPlaces.length > 0 ? dayPlaces : places} routeCoords={dayPlaces.length > 0 ? routeCoords : []} fitKey={fitKey} paddingOpts={paddingOpts} hasDayDetail={hasDayDetail} framedOnMount={initialView.framed} />
       <SelectionController places={places} selectedPlaceId={selectedPlaceId} dayPlaces={dayPlaces} paddingOpts={paddingOpts} />
       <MapClickHandler onClick={onMapClick} />
@@ -711,6 +973,122 @@ export const MapView = memo(function MapView({
       <CameraHoverGuard movingRef={mapMovingRef} onMoveStart={clearHover} />
       <ViewportController onViewportChange={onViewportChange} />
       <LeafletLocationLayer position={userPosition} mode={trackingMode} />
+
+      {/* Start Location Pin with Selected Vehicle/Mode Icon */}
+      {tripRoute?.origin && (
+        <Marker
+          position={[tripRoute.origin.lat, tripRoute.origin.lng]}
+          icon={startPinMarkerIcon}
+          zIndexOffset={3000}
+        >
+          <Tooltip permanent direction="top" className="map-tooltip">
+            🟢 Start: {tripRoute.origin.title} ({travelMode === 'driving' ? '🚗 Drive' : travelMode === 'bicycling' ? '🚲 Bike' : '🚶 Walk'})
+          </Tooltip>
+        </Marker>
+      )}
+
+      {/* Destination Location Pin */}
+      {tripRoute?.destination && (
+        <Marker
+          position={[tripRoute.destination.lat, tripRoute.destination.lng]}
+          icon={destPinMarkerIcon}
+          zIndexOffset={3000}
+        >
+          <Tooltip permanent direction="top" className="map-tooltip">
+            📍 Destination: {tripRoute.destination.title}
+          </Tooltip>
+        </Marker>
+      )}
+
+      {/* Alternative Route Polylines (Sleek Black & White dashed candidate routes with wide hit targets) */}
+      {allRoadPaths.map((path, idx) => {
+        if (idx === selectedRouteIdx) return null
+        return (
+          <Fragment key={`alt-route-group-${idx}`}>
+            {/* Wide Invisible Click Target for Mouse/Touch */}
+            <Polyline
+              key={`alt-hit-${idx}`}
+              positions={path.geometry}
+              pathOptions={{ color: 'transparent', weight: 24, opacity: 0.001, lineCap: 'round', lineJoin: 'round' }}
+              eventHandlers={{
+                click: () => handleSelectRoute(idx),
+              }}
+            >
+              <Tooltip sticky direction="top" className="map-tooltip">
+                Alternative {path.name}: {path.distanceKm} km • {path.durationText} (Click to select)
+              </Tooltip>
+            </Polyline>
+            {/* Outer Dark Casing for High Contrast */}
+            <Polyline
+              key={`alt-casing-${idx}`}
+              positions={path.geometry}
+              pathOptions={{ color: '#0f172a', weight: 8, opacity: 0.9, dashArray: '10, 10', lineCap: 'round', lineJoin: 'round' }}
+              eventHandlers={{
+                click: () => handleSelectRoute(idx),
+              }}
+            />
+            {/* Inner Core Line (Crisp White) */}
+            <Polyline
+              key={`alt-core-${idx}`}
+              positions={path.geometry}
+              pathOptions={{ color: '#ffffff', weight: 4, opacity: 0.95, dashArray: '10, 10', lineCap: 'round', lineJoin: 'round' }}
+              eventHandlers={{
+                click: () => handleSelectRoute(idx),
+              }}
+            />
+          </Fragment>
+        )
+      })}
+
+      {/* Route Path Polyline connecting Start & Destination - Real Road Path or Smooth Curved Animated Path */}
+      {tripRoute?.origin && tripRoute?.destination && (
+        (() => {
+          const pathPoints: [number, number][] = osrmRoadPath?.geometry || (function generateCurvedPathPoints(start: { lat: number; lng: number }, end: { lat: number; lng: number }): [number, number][] {
+            const points: [number, number][] = []
+            const midLat = (start.lat + end.lat) / 2
+            const midLng = (start.lng + end.lng) / 2
+            const dLat = end.lat - start.lat
+            const dLng = end.lng - start.lng
+            const ctrlLat = midLat - dLng * 0.12
+            const ctrlLng = midLng + dLat * 0.12
+
+            for (let i = 0; i <= 60; i++) {
+              const t = i / 60
+              const lat = (1 - t) * (1 - t) * start.lat + 2 * (1 - t) * t * ctrlLat + t * t * end.lat
+              const lng = (1 - t) * (1 - t) * start.lng + 2 * (1 - t) * t * ctrlLng + t * t * end.lng
+              points.push([lat, lng])
+            }
+            return points
+          })(tripRoute.origin, tripRoute.destination)
+
+          return (
+            <>
+              {/* Outer Dark Navy Glow Casing */}
+              <Polyline
+                positions={pathPoints}
+                pathOptions={{ color: '#0f172a', weight: 10, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }}
+              />
+              {/* Main Path Line (Crisp White Core) */}
+              <Polyline
+                positions={pathPoints}
+                pathOptions={{ color: '#ffffff', weight: 5, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }}
+              />
+              {/* Animated Comet Head Pulse */}
+              <Polyline
+                positions={pathPoints}
+                pathOptions={{
+                  color: '#475569',
+                  weight: 6,
+                  opacity: 1,
+                  className: 'animated-yellow-comet-flow',
+                  lineCap: 'round',
+                  lineJoin: 'round',
+                }}
+              />
+            </>
+          )
+        })()
+      )}
 
       <MarkerClusterGroup
         chunkedLoading
@@ -761,6 +1139,63 @@ export const MapView = memo(function MapView({
       onClick={cycleTrackingMode}
       bottomOffset={locationButtonBottom as unknown as number}
     />}
+      {(isRouteLoading || osrmRoadPath) && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-[3000] bg-slate-900/95 backdrop-blur-lg text-white text-xs font-semibold px-4 py-2 rounded-2xl shadow-2xl border border-indigo-500/30 flex items-center gap-3 animate-fade-in pointer-events-auto">
+          {/* Travel Mode Dropdown Menu */}
+          <div className="relative flex items-center bg-slate-800/90 rounded-xl px-2.5 py-1 border border-slate-700/80 hover:border-indigo-500/50 transition-all shadow-sm">
+            <select
+              value={travelMode}
+              onChange={(e) => setTravelMode(e.target.value as 'driving' | 'bicycling' | 'walking')}
+              className="bg-transparent text-white text-xs font-bold focus:outline-none cursor-pointer pr-4 appearance-none py-0.5"
+            >
+              <option value="driving" className="bg-slate-900 text-white py-1">🚗 Drive</option>
+              <option value="bicycling" className="bg-slate-900 text-white py-1">🚲 Bike</option>
+              <option value="walking" className="bg-slate-900 text-white py-1">🚶 Walk</option>
+            </select>
+            <span className="pointer-events-none absolute right-2 text-[9px] text-slate-400">▼</span>
+          </div>
+
+          {/* Route Options Dropdown Menu */}
+          {allRoadPaths.length > 1 && (
+            <>
+              <div className="h-4 w-px bg-slate-700/80" />
+              <div className="relative flex items-center bg-slate-800/90 rounded-xl px-2.5 py-1 border border-slate-700/80 hover:border-purple-500/50 transition-all shadow-sm">
+                <select
+                  value={selectedRouteIdx}
+                  onChange={(e) => handleSelectRoute(Number(e.target.value))}
+                  className="bg-transparent text-purple-300 text-xs font-bold focus:outline-none cursor-pointer pr-4 appearance-none py-0.5"
+                >
+                  {allRoadPaths.map((path, idx) => (
+                    <option key={path.id} value={idx} className="bg-slate-900 text-white py-1">
+                      {idx === 0 ? '🛣️ Main Route' : `🛣️ Alt Route ${idx}`} ({path.distanceKm} km, {path.durationText})
+                    </option>
+                  ))}
+                </select>
+                <span className="pointer-events-none absolute right-2 text-[9px] text-purple-400">▼</span>
+              </div>
+            </>
+          )}
+
+          <div className="h-4 w-px bg-slate-700/80" />
+
+          {/* Mode-specific Distance & Duration */}
+          {isRouteLoading ? (
+            <div className="flex items-center gap-2 text-indigo-300">
+              <svg className="w-4 h-4 text-indigo-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+              <span>Calculating...</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-emerald-400 font-bold">{osrmRoadPath?.distanceKm} km</span>
+              <span className="text-slate-400">•</span>
+              <span className="text-amber-300 font-bold">{osrmRoadPath?.durationText}</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
 
     {TooltipOverlay && (
