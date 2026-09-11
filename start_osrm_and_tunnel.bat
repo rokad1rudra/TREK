@@ -35,7 +35,7 @@ docker compose -f docker-compose.osrm.yml up -d
 
 echo.
 echo [2/3] Starting Multi-Zone OSRM Gateway on Port 5000...
-start "TREK OSRM Gateway :5000" /b node server/scripts/osrm-gateway.js
+start "TREK OSRM Multi-Zone Gateway (Port 5000) [LIVE LOGS]" cmd /k "node server/scripts/osrm-gateway.js"
 
 timeout /t 3 /nobreak >nul
 
