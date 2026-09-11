@@ -31,6 +31,7 @@
     "@simplewebauthn/server": "^13.1.2",
     "@trek/shared": "*",
     "archiver": "^6.0.1",
+    "axios": "^1.20.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.8.0",
     "compression": "^1.8.0",
