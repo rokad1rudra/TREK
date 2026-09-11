@@ -346,7 +346,11 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  const url = req.url || '/';
+  // Ignore favicon without counting
+  if (url === '/favicon.ico') {
+    res.writeHead(204);
+    return res.end();
+  }
 
   // 1. Dashboard Web UI
   if (url === '/' || url === '/dashboard') {
@@ -366,7 +370,7 @@ const server = http.createServer(async (req, res) => {
           status: 'ok',
           service: 'TREK Multi-Zone OSRM Gateway',
           gatewayPort: GATEWAY_PORT,
-          totalRequestsServed: requestCounter,
+          totalRoutesServed: requestCounter,
           zones: ZONES.map((z) => ({ name: z.name, label: z.label, ports: z.ports })),
           zoneHealth: health,
           recentRequests: recentLogs.slice(0, 10),
@@ -383,6 +387,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(recentLogs, null, 2));
   }
 
+  // Only count real OSRM requests
   const reqNum = ++requestCounter;
   const startTime = Date.now();
 
