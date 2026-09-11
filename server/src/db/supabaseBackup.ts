@@ -1,152 +1,208 @@
 /**
- * Supabase Storage SQLite Backup Service
+ * Supabase PostgreSQL SQLite Backup Service
  *
- * Stores the SQLite travel.db in a Supabase Storage bucket so data
- * persists across Railway/Docker restarts without a volume.
+ * Uses DATABASE_URL (direct PostgreSQL connection to Supabase) to persist
+ * the SQLite travel.db in a PostgreSQL `trek_db_backup` table.
  *
- * Required env vars:
- *   SUPABASE_URL              e.g. https://rqbvhaatfiyrnxuuwmoz.supabase.co
- *   SUPABASE_SERVICE_ROLE_KEY  from Supabase → Settings → API
- *
- * The SUPABASE_URL is auto-derived from DATABASE_URL if not set explicitly.
+ * Persists data across container restarts without volumes:
+ *   - Startup:  restoreDbFromSupabase() -> downloads latest snapshot from Supabase Postgres
+ *   - Periodic: backupDbToSupabase(true) -> stores snapshot in Supabase Postgres every 5m
+ *   - Shutdown: backupDbToSupabase() -> final flush before termination
  */
 
-import fs from "node:fs";
-import path from "node:path";
+import fs from 'node:fs';
+import path from 'node:path';
+import { Client } from 'pg';
 
-const BUCKET = "trek-db-backup";
-const OBJECT = "travel.db";
+const DB_FILENAME = 'travel.db';
+let _backupInterval: ReturnType<typeof setInterval> | null = null;
 
+/** Resolve SQLite DB path */
 function getDbPath(): string {
   if (process.env.TREK_DB_FILE) return process.env.TREK_DB_FILE;
-  return path.resolve(__dirname, "../../data/travel.db");
+  const dataDir = path.resolve(__dirname, '../../data');
+  return path.join(dataDir, DB_FILENAME);
 }
 
-/** Derive Supabase project URL from DATABASE_URL if SUPABASE_URL not set */
-function getSupabaseUrl(): string | null {
-  if (process.env.SUPABASE_URL) return process.env.SUPABASE_URL.replace(/\/$/, "");
-  const dbUrl = process.env.DATABASE_URL || "";
-  const match = dbUrl.match(/@db\.([a-z0-9]+)\.supabase\.co/);
-  if (match) return `https://${match[1]}.supabase.co`;
-  return null;
+/**
+ * Sanitize PostgreSQL connection URL in case the password contains
+ * unencoded special characters like '%' or '/' which break URL parsing.
+ */
+export function sanitizePgUrl(rawUrl?: string): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.trim();
+  try {
+    new URL(trimmed);
+    return trimmed;
+  } catch {
+    const match = trimmed.match(/^(postgres(?:ql)?:\/\/)([^:]+):(.*)@([^@/:]+)(?::(\d+))?(\/.*)?$/);
+    if (match) {
+      const [, proto, user, pass, host, port, db] = match;
+      return `${proto}${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}${port ? `:${port}` : ''}${db || '/postgres'}`;
+    }
+    return trimmed;
+  }
 }
 
-function getServiceKey(): string | null {
-  return (
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_KEY ||
-    null
-  );
-}
+async function getPgClient(): Promise<Client | null> {
+  const rawUrl = process.env.DATABASE_URL;
+  if (!rawUrl) return null;
 
-function isConfigured(): boolean {
-  return !!(getSupabaseUrl() && getServiceKey());
-}
+  const connectionString = sanitizePgUrl(rawUrl);
+  if (!connectionString) return null;
 
-/** Ensure the backup bucket exists (creates it if missing) */
-async function ensureBucket(url: string, key: string): Promise<void> {
-  const res = await fetch(`${url}/storage/v1/bucket`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
-  });
-  // 200 = created, 409 = already exists — both are fine
-  if (!res.ok && res.status !== 409) {
-    const txt = await res.text();
-    throw new Error(`Failed to create bucket: ${res.status} ${txt}`);
+  try {
+    const client = new Client({
+      connectionString,
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 8000,
+    });
+    await client.connect();
+
+    // Ensure backup table exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS trek_db_backup (
+        id SERIAL PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL,
+        data BYTEA NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        metadata JSONB
+      );
+    `);
+
+    return client;
+  } catch (err) {
+    console.warn('[Supabase Backup] Could not connect to Supabase Postgres:', err instanceof Error ? err.message : err);
+    return null;
   }
 }
 
 /**
- * Restore travel.db from Supabase Storage on container startup.
- * Called BEFORE the SQLite database module is initialised.
+ * Restore travel.db from Supabase Postgres on startup.
+ * Returns true if restored, false if no backup found.
  */
 export async function restoreDbFromSupabase(): Promise<boolean> {
-  if (process.env.NODE_ENV === "test" || !isConfigured()) return false;
+  if (process.env.NODE_ENV === 'test' || !process.env.DATABASE_URL) return false;
 
-  const url = getSupabaseUrl()!;
-  const key = getServiceKey()!;
   const dbPath = getDbPath();
+  const client = await getPgClient();
+  if (!client) return false;
 
   try {
-    const res = await fetch(`${url}/storage/v1/object/${BUCKET}/${OBJECT}`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
+    const res = await client.query<{ data: Buffer; size_bytes: string; created_at: Date }>(
+      `SELECT data, size_bytes, created_at
+       FROM trek_db_backup
+       WHERE filename = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [DB_FILENAME]
+    );
 
-    if (!res.ok) {
-      if (res.status === 404 || res.status === 400) {
-        console.log("[Supabase Backup] No backup found — starting with fresh database.");
-        return false;
-      }
-      throw new Error(`Download failed: ${res.status}`);
+    if (!res.rows.length || !res.rows[0].data) {
+      console.log('[Supabase Backup] No backup found in Supabase Postgres.');
+      return false;
     }
 
+    const backup = res.rows[0];
     const dir = path.dirname(dbPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const tmpPath = dbPath + ".supa_tmp";
-    fs.writeFileSync(tmpPath, buffer);
-    fs.renameSync(tmpPath, dbPath);
+    const tmpPath = `${dbPath}.restore_tmp`;
+    fs.writeFileSync(tmpPath, backup.data);
+    try {
+      if (fs.existsSync(dbPath)) {
+        try { fs.unlinkSync(dbPath); } catch { /* ignore if locked */ }
+      }
+      fs.renameSync(tmpPath, dbPath);
+    } catch {
+      fs.copyFileSync(tmpPath, dbPath);
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    }
 
-    const sizeMB = (buffer.length / 1024 / 1024).toFixed(2);
-    console.log(`[Supabase Backup] ✅ Restored travel.db from Supabase (${sizeMB} MB)`);
+    const sizeMB = (Number(backup.size_bytes) / 1024 / 1024).toFixed(2);
+    console.log(`[Supabase Backup] ✅ Restored travel.db from Supabase Postgres (${sizeMB} MB, saved ${new Date(backup.created_at).toISOString()})`);
     return true;
   } catch (err) {
-    console.error("[Supabase Backup] Restore failed:", err instanceof Error ? err.message : err);
+    console.error('[Supabase Backup] Restore failed:', err instanceof Error ? err.message : err);
     return false;
+  } finally {
+    await client.end().catch(() => {});
   }
 }
 
 /**
- * Upload current travel.db to Supabase Storage.
+ * Upload travel.db to Supabase Postgres bytea backup table.
+ * Retains the 2 most recent backups to prevent table bloat.
  */
 export async function backupDbToSupabase(silent = false): Promise<boolean> {
-  if (process.env.NODE_ENV === "test" || !isConfigured()) return false;
+  if (process.env.NODE_ENV === 'test' || !process.env.DATABASE_URL) return false;
 
   const dbPath = getDbPath();
   if (!fs.existsSync(dbPath)) return false;
 
-  const url = getSupabaseUrl()!;
-  const key = getServiceKey()!;
+  const client = await getPgClient();
+  if (!client) return false;
 
   try {
-    await ensureBucket(url, key);
+    const buffer = fs.readFileSync(dbPath);
+    const size = buffer.length;
 
-    const fileBuffer = fs.readFileSync(dbPath);
-    const res = await fetch(`${url}/storage/v1/object/${BUCKET}/${OBJECT}`, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/octet-stream",
-        "x-upsert": "true",
-      },
-      body: fileBuffer,
-    });
+    await client.query(
+      `INSERT INTO trek_db_backup (filename, data, size_bytes, metadata)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        DB_FILENAME,
+        buffer,
+        size,
+        JSON.stringify({
+          hostname: process.env.RAILWAY_REPLICA_ID || 'local',
+          node_env: process.env.NODE_ENV || 'production',
+        }),
+      ]
+    );
 
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`Upload failed: ${res.status} ${txt}`);
-    }
+    // Keep only the 2 most recent backups to save storage
+    await client.query(`
+      DELETE FROM trek_db_backup
+      WHERE filename = $1
+        AND id NOT IN (
+          SELECT id FROM trek_db_backup
+          WHERE filename = $1
+          ORDER BY created_at DESC
+          LIMIT 2
+        )
+    `, [DB_FILENAME]);
 
-    const sizeMB = (fileBuffer.length / 1024 / 1024).toFixed(2);
-    if (!silent) console.log(`[Supabase Backup] ✅ Backed up travel.db to Supabase (${sizeMB} MB)`);
+    const sizeMB = (size / 1024 / 1024).toFixed(2);
+    if (!silent) console.log(`[Supabase Backup] ✅ Backed up travel.db to Supabase Postgres (${sizeMB} MB)`);
     return true;
   } catch (err) {
-    console.error("[Supabase Backup] Backup failed:", err instanceof Error ? err.message : err);
+    console.error('[Supabase Backup] Backup failed:', err instanceof Error ? err.message : err);
     return false;
+  } finally {
+    await client.end().catch(() => {});
   }
 }
 
-let _interval: ReturnType<typeof setInterval> | null = null;
-
+/**
+ * Start periodic background backup to Supabase Postgres.
+ */
 export function startSupabasePeriodicBackup(intervalMs = 5 * 60 * 1000): void {
-  if (_interval || !isConfigured()) return;
-  _interval = setInterval(() => { backupDbToSupabase(true).catch(() => {}); }, intervalMs);
-  if (_interval.unref) _interval.unref();
-  console.log(`[Supabase Backup] Periodic backup every ${intervalMs / 60000} min`);
+  if (_backupInterval || !process.env.DATABASE_URL) return;
+  _backupInterval = setInterval(() => {
+    backupDbToSupabase(true).catch(() => {});
+  }, intervalMs);
+  _backupInterval.unref?.();
+  console.log(`[Supabase Backup] Periodic backup enabled (every ${Math.round(intervalMs / 60000)}m)`);
 }
 
+/**
+ * Stop periodic background backup to Supabase Postgres.
+ */
 export function stopSupabasePeriodicBackup(): void {
-  if (_interval) { clearInterval(_interval); _interval = null; }
+  if (_backupInterval) {
+    clearInterval(_backupInterval);
+    _backupInterval = null;
+  }
 }
