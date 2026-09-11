@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { INestApplication } from '@nestjs/common';
+import { restoreDbFromMongo, backupDbToMongo, startPeriodicBackup, stopPeriodicBackup } from './db/mongoBackup';
 import { buildApp } from './bootstrap';
 
 // Create upload and data directories on startup
@@ -78,6 +79,8 @@ const onListen = () => {
   scheduler.startVersionCheck();
   scheduler.startDemoReset();
   scheduler.startIdempotencyCleanup();
+  // Start periodic MongoDB backup every 5 minutes after server is live
+  startPeriodicBackup(5 * 60 * 1000);
   scheduler.startTrekPhotoCacheCleanup();
   scheduler.startPlacePhotoCacheCleanup();
   scheduler.startAirTrailSync();
@@ -99,6 +102,9 @@ let nestApp: INestApplication;
 
 // Strangler toggle: prefixes served by Nest (env-overridable, instant rollback).
 async function bootstrap(): Promise<void> {
+  // Restore SQLite DB from MongoDB GridFS BEFORE the database module loads.
+  // This ensures container restarts always boot with the last persisted state.
+  await restoreDbFromMongo();
   // The whole surface runs on the single NestJS app now (Express decommissioned):
   // global pipeline + /uploads + every /api domain + the platform/transport routes
   // (/mcp, /.well-known, OAuth SDK, SPA catch-all). buildApp() owns the composition
@@ -149,6 +155,7 @@ function shutdown(signal: string): void {
   const { logInfo: sLogInfo, logError: sLogError } = require('./services/auditLog');
   const { closeMcpSessions } = require('./mcp');
   sLogInfo(`${signal} received — shutting down gracefully...`);
+  stopPeriodicBackup();
   scheduler.stop();
   closeMcpSessions();
   void nestApp?.close();
@@ -157,8 +164,14 @@ function shutdown(signal: string): void {
     sLogInfo('HTTP server closed');
     const { closeDb } = require('./db/database');
     closeDb();
-    sLogInfo('Shutdown complete');
-    process.exit(0);
+    // Final backup to MongoDB before exit so no data is lost
+    backupDbToMongo().then(() => {
+      sLogInfo('Shutdown complete');
+      process.exit(0);
+    }).catch(() => {
+      sLogInfo('Shutdown complete (backup failed)');
+      process.exit(0);
+    });
   });
   setTimeout(() => {
     sLogError('Forced shutdown after timeout');
