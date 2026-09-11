@@ -1,9 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
-title OSRM India Engine + Cloudflare Tunnel
+title OSRM 6-Zone India Engine + Cloudflare Tunnel
 
 echo ================================================================
-echo   TREK - OSRM India Engine + Cloudflare Tunnel
+echo   TREK - 6-Zone OSRM India Engine + Multi-Zone Gateway + Tunnel
 echo ================================================================
 echo.
 
@@ -29,13 +29,15 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-echo [1/3] Starting West Zone OSRM Docker Container (Ports 5000 / 5002)...
-docker compose -f docker-compose.osrm.west.yml up -d
+echo [1/3] Starting 6-Zone OSRM Docker Containers (Ports 5001-5006)...
+:: Recreate any containers that held port 5000 previously
+docker compose -f docker-compose.osrm.yml up -d
 
 echo.
-echo [2/3] Checking OSRM container health...
+echo [2/3] Starting Multi-Zone OSRM Gateway on Port 5000...
+start "TREK OSRM Gateway :5000" /b node server/scripts/osrm-gateway.js
+
 timeout /t 3 /nobreak >nul
-docker ps --filter "name=trek_osrm_west"
 
 echo.
 echo ================================================================

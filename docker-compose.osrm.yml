@@ -2,27 +2,17 @@ services:
   osrm-north:
     image: osrm/osrm-backend:latest
     container_name: trek_osrm_north
-    restart: always
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./osrm-data:/data
-    command: osrm-routed --algorithm mld -t 1 /data/northern-zone-latest.osrm
-
-  osrm-south:
-    image: osrm/osrm-backend:latest
-    container_name: trek_osrm_south
-    restart: always
+    restart: unless-stopped
     ports:
       - "5001:5000"
     volumes:
       - ./osrm-data:/data
-    command: osrm-routed --algorithm mld -t 1 /data/southern-zone-latest.osrm
+    command: osrm-routed --algorithm mld -t 1 /data/northern-zone-latest.osrm
 
   osrm-west:
     image: osrm/osrm-backend:latest
     container_name: trek_osrm_west
-    restart: always
+    restart: unless-stopped
     ports:
       - "5002:5000"
     volumes:
@@ -32,7 +22,7 @@ services:
   osrm-east:
     image: osrm/osrm-backend:latest
     container_name: trek_osrm_east
-    restart: always
+    restart: unless-stopped
     ports:
       - "5003:5000"
     volumes:
@@ -42,7 +32,7 @@ services:
   osrm-central:
     image: osrm/osrm-backend:latest
     container_name: trek_osrm_central
-    restart: always
+    restart: unless-stopped
     ports:
       - "5004:5000"
     volumes:
@@ -52,12 +42,19 @@ services:
   osrm-northeast:
     image: osrm/osrm-backend:latest
     container_name: trek_osrm_northeast
-    restart: always
+    restart: unless-stopped
     ports:
       - "5005:5000"
     volumes:
       - ./osrm-data:/data
     command: osrm-routed --algorithm mld -t 1 /data/north-eastern-zone-260823.osrm
 
-
-
+  osrm-south:
+    image: osrm/osrm-backend:latest
+    container_name: trek_osrm_south
+    restart: unless-stopped
+    ports:
+      - "5006:5000"
+    volumes:
+      - ./osrm-data:/data
+    command: osrm-routed --algorithm mld -t 1 /data/southern-zone-latest.osrm

@@ -1528,7 +1528,7 @@ export async function fetchOsrmRoute(
 
   // Otherwise probe local self-hosted OSRM zone ports
   if (!responseData) {
-    const localPorts = [5010, 5000, 5001, 5002, 5003, 5004, 5005];
+    const localPorts = [5000, 5010, 5001, 5002, 5003, 5004, 5005, 5006];
     for (const port of localPorts) {
       const data = await queryOsrmUrl(`http://localhost:${port}`, waypoints);
       if (data) {

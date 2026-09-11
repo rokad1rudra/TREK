@@ -4,7 +4,6 @@ services:
     container_name: trek_osrm_west
     restart: unless-stopped
     ports:
-      - "5000:5000"
       - "5002:5000"
     volumes:
       - ./osrm-data:/data
