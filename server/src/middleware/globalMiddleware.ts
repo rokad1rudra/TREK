@@ -48,14 +48,26 @@ export function applyGlobalMiddleware(
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
     : null;
 
+  const isWildcard = allowedOrigins?.includes('*');
+
   let corsOrigin: cors.CorsOptions['origin'];
-  if (allowedOrigins) {
+  if (isWildcard) {
+    corsOrigin = (_origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      callback(null, true);
+    };
+  } else if (allowedOrigins && allowedOrigins.length > 0) {
     corsOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      if (!origin || allowedOrigins.includes(origin)) callback(null, true);
-      else callback(new Error('Not allowed by CORS'));
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        // Disallow CORS without throwing a 500 internal server error
+        callback(null, false);
+      }
     };
   } else if (process.env.NODE_ENV?.toLowerCase() === 'production') {
-    corsOrigin = false;
+    corsOrigin = (_origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      callback(null, true);
+    };
   } else {
     corsOrigin = true;
   }

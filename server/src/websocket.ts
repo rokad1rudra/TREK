@@ -53,7 +53,7 @@ function setupWebSocket(server: http.Server): void {
   wss = new WebSocketServer({
     noServer: true,
     maxPayload: 64 * 1024, // 64 KB max message size
-    verifyClient: allowedOrigins
+    verifyClient: allowedOrigins && !allowedOrigins.includes('*')
       ? ({ origin }, cb) => {
           if (!origin || allowedOrigins.includes(origin)) cb(true);
           else cb(false, 403, 'Origin not allowed');
