@@ -20,10 +20,40 @@ function seedAdminAccount(db: Database.Database): void {
     const adminEnvProvided = !!(env_admin_email || env_admin_pw);
 
     const userCount = (db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number }).count;
+
+    // If both ADMIN_EMAIL and ADMIN_PASSWORD are explicitly provided, always ensure
+    // that admin account exists with the correct credentials — even when the DB already
+    // has users (e.g. Railway/Docker where the first start seeded a random password and
+    // the env vars were added afterward). This makes the env vars a reliable credential
+    // override for container deployments without requiring a data-volume wipe.
+    if (userCount > 0 && env_admin_email && env_admin_pw) {
+      const bcrypt = require('bcryptjs');
+      const existing = db.prepare('SELECT id, email FROM users WHERE email = ?').get(env_admin_email) as { id: number; email: string } | undefined;
+      if (existing) {
+        // Admin email already exists — update the password so env vars always win.
+        const hash = bcrypt.hashSync(env_admin_pw, BCRYPT_COST);
+        db.prepare('UPDATE users SET password_hash = ?, role = ?, must_change_password = 0, updated_at = CURRENT_TIMESTAMP WHERE email = ?').run(hash, 'admin', env_admin_email);
+        console.log(`[admin] Password for ${env_admin_email} updated from ADMIN_PASSWORD env var.`);
+      } else {
+        // Admin email not found — create it (use unique username derived from email to avoid conflicts).
+        const hash = bcrypt.hashSync(env_admin_pw, BCRYPT_COST);
+        const baseUsername = 'admin';
+        const existingUsername = db.prepare('SELECT id FROM users WHERE username = ?').get(baseUsername);
+        const username = existingUsername ? `admin_${Date.now()}` : baseUsername;
+        db.prepare('INSERT INTO users (username, email, password_hash, role, must_change_password) VALUES (?, ?, ?, ?, 0)').run(username, env_admin_email, hash, 'admin');
+        console.log('');
+        console.log('╔══════════════════════════════════════════════╗');
+        console.log('║  TREK — Admin Account Created from Env Vars  ║');
+        console.log('╠══════════════════════════════════════════════╣');
+        console.log(`║  Email:    ${env_admin_email.padEnd(33)}║`);
+        console.log('╚══════════════════════════════════════════════╝');
+        console.log('');
+      }
+      return;
+    }
+
     if (userCount > 0) {
-      // ADMIN_EMAIL/ADMIN_PASSWORD only take effect on the first run (empty database). Once a
-      // user exists they are silently ignored — a common trip-up: people add the vars after the
-      // fact, restart, nothing changes, and there is no hint why. Say so instead of staying silent.
+      // No ADMIN_EMAIL+ADMIN_PASSWORD pair set — warn if partial config provided.
       if (adminEnvProvided) {
         console.warn('[admin] ADMIN_EMAIL/ADMIN_PASSWORD are set, but users already exist — these only apply on first run (empty database) and are being ignored.');
         console.warn('[admin] Change an existing password from Settings after signing in, reset the admin (see the Troubleshooting wiki), or start with an empty data volume to re-run setup.');
