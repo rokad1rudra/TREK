@@ -556,7 +556,25 @@ export const MapView = memo(function MapView({
         try {
           const res = await mapsApi.search(origName, 'en')
           if (res?.places?.[0] && res.places[0].lat != null && res.places[0].lng != null) {
-            origPoint = { lat: Number(res.places[0].lat), lng: Number(res.places[0].lng), title: origName }
+            const geocodedLat = Number(res.places[0].lat)
+            const geocodedLng = Number(res.places[0].lng)
+
+            let startLat = geocodedLat
+            let startLng = geocodedLng
+
+            // If user's live GPS is active and nearby (within 15 km of geocoded start location),
+            // start the route directly at the user's exact live location (blue dot)
+            if (userPosition && Number.isFinite(userPosition.lat) && Number.isFinite(userPosition.lng)) {
+              const dLat = (userPosition.lat - geocodedLat) * 111
+              const dLng = (userPosition.lng - geocodedLng) * 111 * Math.cos(geocodedLat * (Math.PI / 180))
+              const distKm = Math.sqrt(dLat * dLat + dLng * dLng)
+              if (distKm <= 15.0) {
+                startLat = userPosition.lat
+                startLng = userPosition.lng
+              }
+            }
+
+            origPoint = { lat: startLat, lng: startLng, title: origName }
           }
         } catch {}
       }

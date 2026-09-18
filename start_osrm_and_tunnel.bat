@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
 title OSRM 6-Zone India Engine + Cloudflare Tunnel
 
 echo ================================================================
@@ -35,13 +36,13 @@ docker compose -f docker-compose.osrm.yml up -d
 
 echo.
 echo [2/3] Starting Multi-Zone OSRM Gateway on Port 5000...
-start "TREK OSRM Multi-Zone Gateway (Port 5000) [LIVE LOGS]" cmd /k "node server/scripts/osrm-gateway.js"
+start "TREK OSRM Multi-Zone Gateway (Port 5000) [LIVE LOGS]" cmd /k "cd /d \"%~dp0\" && node server/scripts/osrm-gateway.js"
 
 timeout /t 3 /nobreak >nul
 
 echo.
 echo ================================================================
-echo [3/3] Starting Cloudflare Tunnel on http://localhost:5000
+echo [3/3] Starting Cloudflare Tunnel on http://127.0.0.1:5000
 echo.
 echo Look for the line below starting with:
 echo   https://...trycloudflare.com
@@ -51,7 +52,7 @@ echo   OSRM_ROUTING_URL=https://...trycloudflare.com
 echo ================================================================
 echo.
 
-:: Run Cloudflare Tunnel
-cloudflared tunnel --url http://localhost:5000
+:: Run Cloudflare Tunnel (IPv4 127.0.0.1 with http2 to prevent Windows socket drops)
+cloudflared tunnel --protocol http2 --url http://127.0.0.1:5000
 
 pause

@@ -48,6 +48,11 @@ app.add_middleware(
 # Register API Router
 app.include_router(router)
 
+@app.get("/", include_in_schema=False)
+async def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

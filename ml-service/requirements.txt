@@ -8,3 +8,8 @@ requests>=2.32.0
 pydantic>=2.8.0
 pymongo>=4.8.0
 supabase>=2.8.0
+python-multipart>=0.0.9
+pillow>=10.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+

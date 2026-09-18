@@ -339,3 +339,47 @@ async def get_osrm_matrix(req: OSRMMatrixRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Snap & Travel Vision Search ──
+
+from fastapi import UploadFile, File
+from app.services.snap_travel_service import snap_travel_service
+
+@router.get("/predict/snap-travel/status", tags=["Snap & Travel Vision"])
+async def get_snap_travel_status():
+    """
+    Returns live connection status of Google Cloud Vision API and the preserved custom vector database.
+    """
+    return snap_travel_service.get_status()
+
+@router.post("/predict/snap-travel", tags=["Snap & Travel Vision"])
+async def predict_snap_travel(file: UploadFile = File(...), top_k: int = 3):
+    """
+    Takes an uploaded tourist photo/reel screenshot,
+    identifies landmark/destination via Google Cloud Vision API (or preserved vector database),
+    and returns matching destinations with confidence scores, GPS coordinates, category, and scene labels.
+    """
+    try:
+        content = await file.read()
+        matches = snap_travel_service.search_by_image(content, top_k=top_k)
+        top_match = matches[0] if matches else {}
+        is_confident = top_match.get("is_confident", False) if matches else False
+        status_str = top_match.get("status", "success" if is_confident else "unmatched")
+
+        return {
+            "status": status_str,
+            "matches": matches,
+            "top_destination": top_match.get("destination", "Unknown Landmark"),
+            "category": top_match.get("category", "Unmatched"),
+            "is_confident": is_confident,
+            "coordinates": top_match.get("coordinates"),
+            "vision_provider": top_match.get("source", snap_travel_service.get_status().get("active_provider")),
+            "artifacts_source": snap_travel_service.artifacts_dir,
+            "total_indexed": len(snap_travel_service.metadata)
+        }
+
+    except Exception as e:
+        logger.error(f"Error in predict_snap_travel: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
